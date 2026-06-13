@@ -17,16 +17,58 @@ def list_voices():
     resp.raise_for_status()
     return resp.json().get('data', {}).get('voices', [])
 
-def create_avatar_video(avatar_id, voice_id, script_text, background_url=None, width=1080, height=1920):
-    background = {'type': 'color', 'value': '#1a1a2e'}
+def _build_background(background_url=None):
     if background_url:
-        background = {'type': 'image', 'url': background_url}
+        return {'type': 'image', 'url': background_url}
+    return {'type': 'color', 'value': '#1a1a2e'}
+
+def create_avatar_video(avatar_id, voice_id, script_text, background_url=None, width=1080, height=1920):
+    """Single-scene video: full script, one background. Used as fallback."""
     payload = {
         'video_inputs': [{
             'character': {'type': 'avatar', 'avatar_id': avatar_id, 'avatar_style': 'normal'},
             'voice': {'type': 'text', 'input_text': script_text, 'voice_id': voice_id, 'speed': 0.95},
-            'background': background
+            'background': _build_background(background_url)
         }],
+        'dimension': {'width': width, 'height': height},
+        'test': False
+    }
+    resp = requests.post(f'{HEYGEN_BASE}/v2/video/generate', headers=get_headers(), json=payload)
+    resp.raise_for_status()
+    return resp.json()['data']['video_id']
+
+def create_multiscene_avatar_video(avatar_id, voice_id, script_data, ext_photo_url=None, int_photo_url=None, lot_bg_url=None, width=1080, height=1920):
+    """
+    Multi-scene video matching script structure to vehicle photos:
+    - Scene 1: exterior script + first exterior vehicle photo as background
+    - Scene 2: interior script + first interior vehicle photo as background
+    Falls back to single scene if photo URLs not provided.
+    """
+    exterior_script = script_data.get('exterior_script', '')
+    interior_script = script_data.get('interior_script', '')
+    full_script = script_data.get('full_script', '')
+
+    if not exterior_script or not interior_script:
+        return create_avatar_video(avatar_id, voice_id, full_script, lot_bg_url, width, height)
+
+    video_inputs = []
+
+    ext_bg = _build_background(ext_photo_url or lot_bg_url)
+    video_inputs.append({
+        'character': {'type': 'avatar', 'avatar_id': avatar_id, 'avatar_style': 'normal'},
+        'voice': {'type': 'text', 'input_text': exterior_script, 'voice_id': voice_id, 'speed': 0.95},
+        'background': ext_bg
+    })
+
+    int_bg = _build_background(int_photo_url or lot_bg_url)
+    video_inputs.append({
+        'character': {'type': 'avatar', 'avatar_id': avatar_id, 'avatar_style': 'normal'},
+        'voice': {'type': 'text', 'input_text': interior_script, 'voice_id': voice_id, 'speed': 0.95},
+        'background': int_bg
+    })
+
+    payload = {
+        'video_inputs': video_inputs,
         'dimension': {'width': width, 'height': height},
         'test': False
     }
