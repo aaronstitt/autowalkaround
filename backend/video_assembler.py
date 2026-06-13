@@ -1,139 +1,298 @@
-import os, requests, tempfile, subprocess
+import os, requests, tempfile, subprocess, math
 from typing import List
 import json
 
 HEADERS = {'User-Agent': 'Mozilla/5.0'}
 
 def download_file(url, dest):
-    try:
-        resp = requests.get(url, stream=True, timeout=30, headers=HEADERS)
-        resp.raise_for_status()
-        with open(dest, 'wb') as f:
-            for chunk in resp.iter_content(8192): f.write(chunk)
-        return True
-    except Exception as e:
+        try:
+                    resp = requests.get(url, stream=True, timeout=30, headers=HEADERS)
+                    resp.raise_for_status()
+                    with open(dest, 'wb') as f:
+                                    for chunk in resp.iter_content(8192): f.write(chunk)
+                                                return True
+except Exception as e:
         print(f'Download failed {url}: {e}')
         return False
 
 def get_video_duration(path):
-    cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', path]
-    r = subprocess.run(cmd, capture_output=True, text=True)
-    try:
-        return float(json.loads(r.stdout)['format']['duration'])
-    except Exception:
+        cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', path]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        try:
+                    return float(json.loads(r.stdout)['format']['duration'])
+except Exception:
         return 60.0
 
-def _simple_slideshow(downloaded, output_path, total_duration):
-    with tempfile.TemporaryDirectory() as tmpdir:
-        n = len(downloaded)
-        per_photo = total_duration / n
-        list_file = os.path.join(tmpdir, 'photos.txt')
-        with open(list_file, 'w') as f:
-            for p in downloaded:
-                f.write("file '" + p + "'\nduration " + str(round(per_photo, 2)) + "\n")
-            f.write("file '" + downloaded[-1] + "'\n")
-        cmd = ['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', list_file,
-               '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1',
-               '-c:v', 'libx264', '-preset', 'fast', '-crf', '23', '-pix_fmt', 'yuv420p',
-               '-r', '30', '-t', str(total_duration), output_path]
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
-        if r.returncode != 0:
-            raise RuntimeError('Slideshow failed: ' + r.stderr[:500])
-        return output_path
+def get_video_dimensions(path):
+        cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', '-select_streams', 'v:0', path]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        try:
+                    s = json.loads(r.stdout)['streams'][0]
+                    return int(s['width']), int(s['height'])
+except Exception:
+        return 1080, 1920
 
-def create_pov_slideshow(photo_urls, output_path, total_duration):
-    with tempfile.TemporaryDirectory() as tmpdir:
-        downloaded = []
-        for i, url in enumerate(photo_urls[:18]):
-            ext = url.split('.')[-1].split('?')[0] or 'jpg'
-            dest = os.path.join(tmpdir, f'photo_{i:03d}.{ext}')
-            if download_file(url, dest):
-                downloaded.append(dest)
-        if not downloaded:
-            raise ValueError('No photos downloaded')
-        n = len(downloaded)
-        per_photo = total_duration / n
+def build_pov_background(photo_paths, output_path, total_duration, width=1080, height=1920):
+        """
+            Creates a dynamic background slideshow from vehicle photos.
+                Each photo gets a slow Ken Burns zoom/pan effect to simulate POV camera movement.
+                    Output: 9:16 vertical video (1080x1920) matching HeyGen portrait format.
+                        """
+        if not photo_paths:
+                    raise ValueError('No photos to build background from')
+
+        n = len(photo_paths)
         fps = 30
-        frames_per = max(int(per_photo * fps), 30)
-        filter_parts = []
-        concat_parts = []
-        inputs = []
-        for i, photo in enumerate(downloaded):
-            inputs += ['-loop', '1', '-t', str(per_photo + 0.5), '-i', photo]
-            if i % 3 == 0:
-                zf = 'zoompan=z=min(zoom+0.0012\\,1.4):x=iw/2-(iw/zoom/2):y=ih/2-(ih/zoom/2):d=' + str(frames_per) + ':s=1080x1920:fps=' + str(fps)
-            elif i % 3 == 1:
-                zf = 'zoompan=z=1.3:x=iw*0.1:y=ih/2-(ih/zoom/2):d=' + str(frames_per) + ':s=1080x1920:fps=' + str(fps)
-            else:
-                zf = 'zoompan=z=1.2:x=iw*0.05:y=ih/2-(ih/zoom/2):d=' + str(frames_per) + ':s=1080x1920:fps=' + str(fps)
-            scale_f = 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920'
-            filter_parts.append('[' + str(i) + ':v]' + scale_f + ',' + zf + ',setsar=1[v' + str(i) + ']')
-            concat_parts.append('[v' + str(i) + ']')
-        filter_complex = ';'.join(filter_parts) + ';' + ''.join(concat_parts) + 'concat=n=' + str(n) + ':v=1:a=0[outv]'
-        cmd = ['ffmpeg', '-y'] + inputs + [
-            '-filter_complex', filter_complex,
-            '-map', '[outv]',
-            '-c:v', 'libx264', '-preset', 'fast', '-crf', '23', '-pix_fmt', 'yuv420p',
-            '-t', str(total_duration), output_path
-        ]
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=360)
-        if r.returncode != 0:
-            return _simple_slideshow(downloaded, output_path, total_duration)
-        return output_path
+        per_photo = total_duration / n
+        frames_per = max(int(per_photo * fps), fps)  # at least 1 second of frames per photo
 
-def composite_pov_video(heygen_path, bg_path, output_path):
-    filter_complex = (
-        '[1:v]scale=400:-1,'
-        'crop=400:in_h*0.80:0:in_h*0.12,'
-        'format=yuva420p[avatar];'
-        '[0:v][avatar]overlay=W-w-20:H-h-72:shortest=1[outv]'
+    inputs = []
+    filter_parts = []
+    concat_parts = []
+
+    for i, photo in enumerate(photo_paths):
+                inputs += ['-loop', '1', '-t', str(per_photo + 1.0), '-i', photo]
+                # Alternate between zoom-in (push in toward feature), pan left, pan right
+                effect = i % 4
+                if effect == 0:
+                                # Slow zoom in from normal to 1.3x (simulates approaching feature)
+                                zoom_expr = 'zoom=min(zoom+0.0008\\,1.3)'
+                                x_expr = 'x=iw/2-(iw/zoom/2)'
+                                y_expr = 'y=ih/2-(ih/zoom/2)'
+elif effect == 1:
+            # Pan left across the car
+            zoom_expr = 'zoom=1.25'
+            x_expr = 'x=iw*0.15*(1-on/' + str(frames_per) + ')'
+            y_expr = 'y=ih/2-(ih/zoom/2)'
+elif effect == 2:
+            # Pan right
+            zoom_expr = 'zoom=1.25'
+            x_expr = 'x=iw*0.15*(on/' + str(frames_per) + ')'
+            y_expr = 'y=ih/2-(ih/zoom/2)'
+else:
+            # Slow zoom out (backing away, like checking whole car)
+                zoom_expr = 'zoom=max(zoom-0.0006\\,1.0)'
+                x_expr = 'x=iw/2-(iw/zoom/2)'
+                y_expr = 'y=ih*(0.45)-(ih/zoom/2)'
+
+        zoompan = (
+                        f'[{i}:v]scale={width*2}:{height*2}:force_original_aspect_ratio=increase,'
+                        f'crop={width*2}:{height*2},'
+                        f'zoompan={zoom_expr}:{x_expr}:{y_expr}:d={frames_per}:s={width}x{height}:fps={fps},'
+                        f'setsar=1[v{i}]'
+        )
+        filter_parts.append(zoompan)
+        concat_parts.append(f'[v{i}]')
+
+    filter_complex = ';'.join(filter_parts) + ';' + ''.join(concat_parts) + f'concat=n={n}:v=1:a=0[outv]'
+
+    cmd = (
+                ['ffmpeg', '-y'] + inputs +
+                ['-filter_complex', filter_complex,
+                          '-map', '[outv]',
+                          '-c:v', 'libx264', '-preset', 'fast', '-crf', '22',
+                          '-pix_fmt', 'yuv420p', '-r', str(fps),
+                          '-t', str(total_duration), output_path]
     )
-    cmd = ['ffmpeg', '-y',
-           '-i', bg_path, '-i', heygen_path,
-           '-filter_complex', filter_complex,
-           '-map', '[outv]', '-map', '1:a',
-           '-c:v', 'libx264', '-preset', 'fast', '-crf', '22', '-pix_fmt', 'yuv420p',
-           '-c:a', 'aac', '-shortest', output_path]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=480)
     if r.returncode != 0:
-        raise RuntimeError('Composite failed: ' + r.stderr[:600])
-    return output_path
+                # Fallback: simple slideshow without Ken Burns
+                print(f'Ken Burns failed, using simple slideshow: {r.stderr[:300]}')
+                return _simple_slideshow(photo_paths, output_path, total_duration, width, height)
+            return output_path
+
+def _simple_slideshow(photo_paths, output_path, total_duration, width=1080, height=1920):
+        """Simple fallback slideshow with no fancy effects."""
+        n = len(photo_paths)
+        per_photo = total_duration / n
+        with tempfile.TemporaryDirectory() as tmpdir:
+                    list_file = os.path.join(tmpdir, 'photos.txt')
+                    with open(list_file, 'w') as f:
+                                    for p in photo_paths:
+                                                        f.write(f"file '{p}'\nduration {round(per_photo, 2)}\n")
+                                                    f.write(f"file '{photo_paths[-1]}'\n")
+                                cmd = [
+                        'ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', list_file,
+                        '-vf', f'scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},setsar=1',
+                        '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+                        '-pix_fmt', 'yuv420p', '-r', '30', '-t', str(total_duration), output_path
+                                ]
+                    r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+                    if r.returncode != 0:
+                                    raise RuntimeError('Simple slideshow failed: ' + r.stderr[:400])
+                                return output_path
+
+def composite_avatar_on_background(heygen_path, bg_path, output_path, width=1080, height=1920):
+        """
+            Composites the HeyGen avatar video on top of the vehicle photo background.
+
+                Layout (POV selfie style):
+                    - Full background: vehicle photos (1080x1920)
+                        - Avatar: scaled to fill about 45% of frame width, positioned bottom-right
+                              so it looks like the salesperson is in the foreground holding their phone
+                                  - Semi-transparent gradient at bottom for text overlay area
+                                      - Avatar has a subtle drop shadow / vignette to blend with background
+
+                                          The HeyGen output is typically 1080x1920 with a solid background color.
+                                              We use colorkey or overlay with the avatar cropped tight to the person.
+                                                  Since HeyGen backgrounds are solid dark color, we use chromakey-style crop
+                                                      by simply overlaying the avatar at reduced opacity on the right side,
+                                                          cropped to show only the lower 80% (removing excess headroom).
+                                                              """
+        # Get dimensions of heygen video
+        h_w, h_h = get_video_dimensions(heygen_path)
+
+    # Avatar target: 48% of output width, positioned bottom-right with padding
+    avatar_target_w = int(width * 0.48)
+    # Scale avatar to target width, keep aspect ratio
+    avatar_scale = f'scale={avatar_target_w}:-2'
+
+    # Crop top 15% (removes excess headroom from HeyGen), keep lower 85%
+    # Then position: X = right side with 12px padding, Y = bottom with 20px padding
+    filter_complex = (
+                # First prepare background: ensure correct size
+        f'[0:v]scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},setsar=1[bg];'
+                # Prepare avatar: scale down, crop top headroom, add subtle shadow via pad
+                f'[1:v]{avatar_scale}[avatar_scaled];'
+                f'[avatar_scaled]crop=iw:ih*0.85:0:ih*0.10[avatar_cropped];'
+                # Overlay avatar bottom-right corner
+                f'[bg][avatar_cropped]overlay=W-w-16:H-h-24:shortest=1[outv]'
+    )
+
+    cmd = [
+                'ffmpeg', '-y',
+                '-i', bg_path,
+                '-i', heygen_path,
+                '-filter_complex', filter_complex,
+                '-map', '[outv]',
+                '-map', '1:a',
+                '-c:v', 'libx264', '-preset', 'fast', '-crf', '21',
+                '-pix_fmt', 'yuv420p',
+                '-c:a', 'aac', '-b:a', '128k',
+                '-shortest', output_path
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=360)
+    if r.returncode != 0:
+                raise RuntimeError('Composite failed: ' + r.stderr[:600])
+            return output_path
 
 def add_text_overlays(video_path, output_path, vehicle_name, price, dealer_name):
-    def safe(s): return str(s).replace("'", '').replace(':', '-').replace('"', '')[:50]
-    vname = safe(vehicle_name)
-    vprice = '$' + safe(price) if price else ''
-    vdealer = safe(dealer_name)
-    parts = ["drawtext=text='" + vname + "':fontcolor=white:fontsize=32:x=(w-text_w)/2:y=h-175:box=1:boxcolor=black@0.6:boxborderw=10"]
-    if vprice:
-        parts.append("drawtext=text='" + vprice + "':fontcolor=#FFD700:fontsize=42:x=(w-text_w)/2:y=h-120:box=1:boxcolor=black@0.6:boxborderw=8")
-    if vdealer:
-        parts.append("drawtext=text='" + vdealer + "':fontcolor=white:fontsize=22:x=(w-text_w)/2:y=h-60:box=1:boxcolor=black@0.6:boxborderw=6")
-    cmd = ['ffmpeg', '-y', '-i', video_path, '-vf', ','.join(parts),
-           '-c:v', 'libx264', '-preset', 'fast', '-crf', '22', '-pix_fmt', 'yuv420p', '-c:a', 'copy', output_path]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        """Adds vehicle name, price, and dealer name as text overlays at the bottom."""
+        def safe(s):
+                    return str(s or '').replace("'", '').replace(':', '-').replace('"', '').replace('\\', '')[:55]
+
+        vname = safe(vehicle_name)
+        vprice = ('$' + safe(price)) if price else ''
+        vdealer = safe(dealer_name)
+
+    drawtext_filters = []
+    if vname:
+                drawtext_filters.append(
+                                f"drawtext=text='{vname}':fontcolor=white:fontsize=30:x=(w-text_w)/2:y=h-180:"
+                                f"box=1:boxcolor=black@0.65:boxborderw=8"
+                )
+            if vprice:
+                        drawtext_filters.append(
+                                        f"drawtext=text='{vprice}':fontcolor=#FFD700:fontsize=40:x=(w-text_w)/2:y=h-125:"
+                                        f"box=1:boxcolor=black@0.65:boxborderw=7"
+                        )
+                    if vdealer:
+                                drawtext_filters.append(
+                                                f"drawtext=text='{vdealer}':fontcolor=white:fontsize=22:x=(w-text_w)/2:y=h-68:"
+                                                f"box=1:boxcolor=black@0.65:boxborderw=6"
+                                )
+
+    if not drawtext_filters:
+                # Nothing to add, just copy
+                import shutil
+                shutil.copy(video_path, output_path)
+                return output_path
+
+    vf = ','.join(drawtext_filters)
+    cmd = [
+                'ffmpeg', '-y', '-i', video_path,
+                '-vf', vf,
+                '-c:v', 'libx264', '-preset', 'fast', '-crf', '21',
+                '-pix_fmt', 'yuv420p', '-c:a', 'copy', output_path
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
     if r.returncode != 0:
-        raise RuntimeError('Text overlay failed: ' + r.stderr[:500])
-    return output_path
+                raise RuntimeError('Text overlay failed: ' + r.stderr[:500])
+            return output_path
+
+def download_vehicle_photos(photo_urls, tmpdir, max_photos=16):
+        """Downloads vehicle photos and returns local paths."""
+        downloaded = []
+        for i, url in enumerate(photo_urls[:max_photos]):
+                    ext = url.split('.')[-1].split('?')[0].lower() or 'jpg'
+                    if ext not in ('jpg', 'jpeg', 'png', 'webp'):
+                                    ext = 'jpg'
+                                dest = os.path.join(tmpdir, f'photo_{i:03d}.{ext}')
+                    if download_file(url, dest):
+                                    downloaded.append(dest)
+                            return downloaded
 
 async def assemble_final_video(vehicle, heygen_video_url, output_dir, job_id):
-    os.makedirs(output_dir, exist_ok=True)
-    heygen_path    = os.path.join(output_dir, job_id + '_heygen.mp4')
-    bg_path        = os.path.join(output_dir, job_id + '_bg.mp4')
-    composite_path = os.path.join(output_dir, job_id + '_composite.mp4')
-    final_path     = os.path.join(output_dir, job_id + '_final.mp4')
+        """
+            Full assembly pipeline:
+                1. Download HeyGen avatar video
+                    2. Download vehicle photos, split exterior/interior by feature ratio
+                        3. Build animated POV background slideshow from photos
+                            4. Composite avatar on background (portrait bottom-right)
+                                5. Add text overlays
+                                    6. Return final MP4 path
+                                        """
+        os.makedirs(output_dir, exist_ok=True)
+
+    heygen_path   = os.path.join(output_dir, f'{job_id}_heygen.mp4')
+    bg_path       = os.path.join(output_dir, f'{job_id}_bg.mp4')
+    composite_path = os.path.join(output_dir, f'{job_id}_composite.mp4')
+    final_path    = os.path.join(output_dir, f'{job_id}_final.mp4')
+
+    # 1. Download HeyGen video
     if not download_file(heygen_video_url, heygen_path):
-        raise ValueError('Failed to download HeyGen video')
+                raise ValueError('Failed to download HeyGen video from: ' + heygen_video_url)
+
+    # 2. Get actual duration from the HeyGen output
     duration = get_video_duration(heygen_path)
-    photos = vehicle.get('photos', [])
-    if not photos:
-        raise ValueError('No vehicle photos available')
-    n_ext = len(vehicle.get('exterior_features', []))
-    n_int = len(vehicle.get('interior_features', []))
-    total = max(n_ext + n_int, 1)
-    split = max(int(len(photos) * n_ext / total), 2)
-    ordered = photos[:split] + photos[split:]
-    create_pov_slideshow(ordered, bg_path, duration)
-    composite_pov_video(heygen_path, bg_path, composite_path)
-    add_text_overlays(composite_path, final_path, vehicle.get('name', ''), vehicle.get('price', ''), vehicle.get('dealer_name', ''))
+    print(f'HeyGen video duration: {duration:.1f}s')
+
+    # 3. Get vehicle photos — order exterior first, then interior
+    all_photos = vehicle.get('photos', [])
+    if not all_photos:
+                raise ValueError('No vehicle photos available for this listing')
+
+    ext_features = vehicle.get('exterior_features', [])
+    int_features = vehicle.get('interior_features', [])
+    total_features = max(len(ext_features) + len(int_features), 1)
+    ext_ratio = len(ext_features) / total_features
+
+    # Split photos: exterior portion first, interior portion second
+    n_photos = min(len(all_photos), 16)
+    n_ext_photos = max(int(n_photos * ext_ratio), 2)
+    n_int_photos = max(n_photos - n_ext_photos, 2)
+
+    ordered_urls = all_photos[:n_ext_photos] + all_photos[n_ext_photos:n_ext_photos + n_int_photos]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+                downloaded = download_vehicle_photos(ordered_urls, tmpdir)
+                if not downloaded:
+                                raise ValueError('Failed to download any vehicle photos')
+
+                print(f'Downloaded {len(downloaded)} vehicle photos')
+
+        # 4. Build POV background slideshow
+                build_pov_background(downloaded, bg_path, duration)
+
+    # 5. Composite avatar on background
+    composite_avatar_on_background(heygen_path, bg_path, composite_path)
+
+    # 6. Add text overlays
+    add_text_overlays(
+                composite_path, final_path,
+                vehicle.get('name', ''),
+                vehicle.get('price', ''),
+                vehicle.get('dealer_name', '')
+    )
+
     return final_path
