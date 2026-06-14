@@ -94,12 +94,18 @@ def build_composite_walkaround(photo_paths, heygen_path, output_path, vehicle_na
             text_filters.append("drawtext=text='${}':fontcolor=#FFD700:fontsize=30:x=(w-text_w)/2:y=98:box=1:boxcolor=black@0.65:boxborderw=5".format(vp))
         if vd:
             text_filters.append("drawtext=text='{}':fontcolor=white:fontsize=18:x=(w-text_w)/2:y=h-50:box=1:boxcolor=black@0.55:boxborderw=4".format(vd))
-        if has_alpha:
+                if has_alpha:
             text_chain = (','.join(text_filters) + ',') if text_filters else ''
-            filter_complex = '[0:v]' + text_chain + 'setsar=1[bg];[1:v]scale=' + str(aaron_w) + ':' + str(aaron_h) + ':force_original_aspect_ratio=decrease[av];[bg][av]overlay=' + str(aaron_x) + ':' + str(aaron_y) + ':format=auto:shortest=1[out]'
+            filter_complex = (
+                '[0:v]' + text_chain + 'setsar=1[bg];'
+                + '[1:v:0]scale=' + str(aaron_w) + ':' + str(aaron_h) + ':force_original_aspect_ratio=decrease,pad=' + str(aaron_w) + ':' + str(aaron_h) + ':(ow-iw)/2:(oh-ih)/2[color];'
+                + '[1:v:1]scale=' + str(aaron_w) + ':' + str(aaron_h) + ':force_original_aspect_ratio=decrease,pad=' + str(aaron_w) + ':' + str(aaron_h) + ':(ow-iw)/2:(oh-ih)/2[alpha];'
+                + '[color][alpha]alphamerge[av];'
+                + '[bg][av]overlay=' + str(aaron_x) + ':' + str(aaron_y) + ':shortest=1[out]'
+            )
         else:
             text_chain = (','.join(text_filters) + ',') if text_filters else ''
-            filter_complex = '[0:v]' + text_chain + 'setsar=1[bg];[1:v]scale=' + str(aaron_w) + ':' + str(aaron_h) + ':force_original_aspect_ratio=decrease,colorkey=0xFFFFFF:0.3:0.2[av];[bg][av]overlay=' + str(aaron_x) + ':' + str(aaron_y) + ':shortest=1[out]'
+            filter_complex = '[0:v]' + text_chain + 'setsar=1[bg];[1:v]scale=' + str(aaron_w) + ':' + str(aaron_h) + ':force_original_aspect_ratio=decrease,colorkey=0xFFFFFF:0.3:0.2[av];[bg][av]alphamerge[avm];' + '[bg][avm]overlay=' + str(aaron_x) + ':' + str(aaron_y) + ':shortest=1[out]'
         compose_cmd = ['ffmpeg', '-y', '-i', slideshow_path, '-i', heygen_path, '-filter_complex', filter_complex, '-map', '[out]', '-map', '1:a', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '26', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-b:v', '1000k', '-maxrate', '1200k', '-bufsize', '1800k', '-threads', '2', '-shortest', output_path]
         print("Compositing Aaron onto vehicle photos (alpha={})...".format(has_alpha))
         r = subprocess.run(compose_cmd, capture_output=True, text=True, timeout=600)
