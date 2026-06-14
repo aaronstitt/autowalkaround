@@ -1,8 +1,8 @@
 import os, requests, subprocess, json, shutil, tempfile
 
 HEADERS = {'User-Agent': 'Mozilla/5.0'}
-W = 1080
-H = 1920
+W = 720
+H = 1280
 
 def download_file(url, dest):
     try:
@@ -55,6 +55,7 @@ def assemble_with_single_pass(photo_path, heygen_path, output_path, duration, ve
         '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '26',
         '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k',
         '-threads', '2', '-shortest',
+                '-b:v', '1500k', '-maxrate', '1500k', '-bufsize', '2000k',
         output_path
     ]
     print('Single-pass assemble: duration=' + str(duration))
