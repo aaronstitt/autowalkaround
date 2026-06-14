@@ -8,10 +8,10 @@ def get_headers():
     return {'x-api-key': os.getenv('HEYGEN_API_KEY'), 'Content-Type': 'application/json'}
 
 def list_avatars():
-    """List all avatar looks (V3 API - returns digital_twin + stock avatars)."""
+    """List all avatar looks (V3 API)."""
     avatars = []
     try:
-        resp = requests.get(f'{HEYGEN_BASE}/v3/avatars/looks?avatar_type=digital_twin&ownership=private', headers=get_headers())
+        resp = requests.get(f'{HEYGEN_BASE}/v3/avatars/looks?ownership=private', headers=get_headers())
         if resp.status_code == 200:
             looks = _extract_looks(resp.json())
             avatars.extend(looks)
@@ -45,30 +45,53 @@ def list_voices():
     return resp.json().get('data', {}).get('voices', [])
 
 def get_look_id_for_avatar(avatar_group_id):
-    """Given avatar group ID, return first available look ID."""
+    """
+    Given avatar group ID, return first available look ID.
+    Uses group_id filter to get looks for this specific avatar group.
+    Falls back to avatar_group_id if no looks found.
+    """
     try:
+        # Use group_id filter to get all looks for this avatar
         resp = requests.get(
-            f'{HEYGEN_BASE}/v3/avatars/looks?avatar_type=digital_twin&ownership=private',
+            f'{HEYGEN_BASE}/v3/avatars/looks?group_id={avatar_group_id}',
             headers=get_headers()
         )
-        if resp.status_code != 200:
-            return avatar_group_id
-        looks = _extract_looks(resp.json())
-        print(f'HeyGen looks: {len(looks)} looks found')
-        for look in looks:
-            if isinstance(look, dict):
-                if look.get('avatar_group_id') == avatar_group_id:
-                    return look.get('id', avatar_group_id)
-                if look.get('id') == avatar_group_id:
-                    return avatar_group_id
-        prefix = avatar_group_id[:8]
-        for look in looks:
-            if isinstance(look, dict) and look.get('id', '').startswith(prefix):
-                return look.get('id', avatar_group_id)
-        if looks and isinstance(looks[0], dict):
-            return looks[0].get('id', avatar_group_id)
+        print(f'HeyGen looks by group_id {resp.status_code}: {resp.text[:300]}')
+        if resp.status_code == 200:
+            looks = _extract_looks(resp.json())
+            print(f'HeyGen looks by group_id: {len(looks)} looks found')
+            if looks and isinstance(looks[0], dict):
+                look_id = looks[0].get('id')
+                if look_id:
+                    return look_id
     except Exception as e:
-        print(f'get_look_id error: {e}')
+        print(f'get_look_id group_id error: {e}')
+    
+    # Fallback: try without group_id filter
+    try:
+        resp2 = requests.get(
+            f'{HEYGEN_BASE}/v3/avatars/looks?ownership=private',
+            headers=get_headers()
+        )
+        if resp2.status_code == 200:
+            looks2 = _extract_looks(resp2.json())
+            print(f'HeyGen all private looks: {len(looks2)} found')
+            for look in looks2:
+                if isinstance(look, dict):
+                    gid = look.get('group_id', '')
+                    lid = look.get('id', '')
+                    if gid == avatar_group_id or lid == avatar_group_id:
+                        return lid or avatar_group_id
+            # Return first look if any
+            if looks2 and isinstance(looks2[0], dict):
+                first_id = looks2[0].get('id')
+                if first_id:
+                    print(f'Using first available look: {first_id}')
+                    return first_id
+    except Exception as e2:
+        print(f'get_look_id fallback error: {e2}')
+    
+    print(f'Using avatar_group_id as fallback: {avatar_group_id}')
     return avatar_group_id
 
 def create_multiscene_avatar_video(avatar_id, voice_id, script_data, ext_photo_url=None, int_photo_url=None, lot_bg_url=None, width=1080, height=1920):
