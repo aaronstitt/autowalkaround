@@ -8,7 +8,6 @@ def get_headers():
     return {'x-api-key': os.getenv('HEYGEN_API_KEY'), 'Content-Type': 'application/json'}
 
 def list_avatars():
-    """List all avatar looks (V3 API)."""
     avatars = []
     try:
         resp = requests.get(f'{HEYGEN_BASE}/v3/avatars/looks?ownership=private', headers=get_headers())
@@ -26,7 +25,6 @@ def list_avatars():
     return avatars
 
 def _extract_looks(json_resp):
-    """Handle both list and dict response formats from HeyGen /v3/avatars/looks."""
     raw = json_resp.get('data', [])
     if isinstance(raw, list):
         return raw
@@ -83,10 +81,10 @@ def get_look_id_for_avatar(avatar_group_id):
     return avatar_group_id
 
 def create_multiscene_avatar_video(avatar_id, voice_id, script_data, ext_photo_url=None, int_photo_url=None, lot_bg_url=None, width=720, height=1280):
-    """Create HeyGen video as plain MP4 (full-screen talking head).
-    We no longer need transparent webm - the assembly pipeline uses Aaron as
-    full-screen intro/outro with vehicle photos/video as the main content.
-    """
+    '''Create HeyGen MP4 talking head video with optional lot background image.
+    The lot_bg_url sets the background behind Aaron so he appears on the actual
+    dealership lot instead of a generic studio background.
+    '''
     exterior_script = script_data.get('exterior_script', '')
     interior_script = script_data.get('interior_script', '')
     full_script = script_data.get('full_script', '')
@@ -97,7 +95,7 @@ def create_multiscene_avatar_video(avatar_id, voice_id, script_data, ext_photo_u
     if exterior_script and interior_script:
         script_to_use = exterior_script + ' ' + interior_script
 
-    # Request plain MP4 - no transparency needed, Aaron is full-screen segments
+    # Build payload with lot background if provided
     payload = {
         'type': 'avatar',
         'avatar_id': look_id,
@@ -107,11 +105,24 @@ def create_multiscene_avatar_video(avatar_id, voice_id, script_data, ext_photo_u
         'aspect_ratio': '9:16',
         'output_format': 'mp4',
     }
-    print(f'Creating HeyGen MP4 talking head video...')
+
+    # Set the IUC lot background so Aaron appears ON the actual dealership lot
+    if lot_bg_url:
+        payload['background'] = {'url': lot_bg_url}
+        print(f'Using lot background: {lot_bg_url[:80]}')
+
+    print(f'Creating HeyGen MP4 with lot background...')
     resp = requests.post(f'{HEYGEN_BASE}/v3/videos', headers=get_headers(), json=payload)
     print(f'HeyGen V3 create response {resp.status_code}: {resp.text[:500]}')
+
     if resp.status_code != 200:
-        raise RuntimeError(f'HeyGen create failed: {resp.status_code}: {resp.text[:300]}')
+        # Fallback: try without background if it failed
+        print('Retrying without background...')
+        payload.pop('background', None)
+        resp = requests.post(f'{HEYGEN_BASE}/v3/videos', headers=get_headers(), json=payload)
+        print(f'HeyGen fallback response {resp.status_code}: {resp.text[:500]}')
+        if resp.status_code != 200:
+            raise RuntimeError(f'HeyGen create failed: {resp.status_code}: {resp.text[:300]}')
 
     data = resp.json().get('data', {})
     video_id = data.get('video_id')
@@ -123,11 +134,10 @@ def create_avatar_video(avatar_id, voice_id, script, background_url=None):
     return create_multiscene_avatar_video(
         avatar_id, voice_id,
         {'full_script': script},
-        ext_photo_url=background_url
+        lot_bg_url=background_url
     )
 
 def poll_video_status(video_id, timeout=600, interval=10):
-    """Poll HeyGen V3 video status until completed or failed."""
     start = time.time()
     while time.time() - start < timeout:
         try:
