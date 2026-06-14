@@ -45,21 +45,21 @@ export default function Dashboard() {
     if (!vehicleUrl || !selectedSp) return;
     setGenerating(true); setError('');
     try {
-      // Fetch the vehicle page HTML from the browser (avoids server-side bot detection)
+      // Use Vercel API route to fetch vehicle page HTML server-side (avoids CORS + bot detection)
       let pageHtml: string | undefined;
       try {
-        const resp = await fetch(vehicleUrl, {
-          headers: {
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-          }
+        const scrapeResp = await fetch('/api/scrape', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: vehicleUrl }),
         });
-        if (resp.ok) {
-          pageHtml = await resp.text();
+        if (scrapeResp.ok) {
+          const scrapeData = await scrapeResp.json();
+          pageHtml = scrapeData.html;
         }
       } catch(fetchErr) {
-        // If browser fetch fails (CORS etc), backend will try server-side
-        console.warn('Browser fetch of vehicle page failed, backend will retry:', fetchErr);
+        // If Vercel scrape fails, backend will try server-side
+        console.warn('Vercel scrape failed, backend will retry:', fetchErr);
       }
 
       const job = await video.generate({ vehicle_url: vehicleUrl, salesperson_id: selectedSp, page_html: pageHtml });
