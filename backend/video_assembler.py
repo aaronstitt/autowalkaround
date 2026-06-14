@@ -30,11 +30,7 @@ def prescale_photo(src, dest):
     return r.returncode == 0 and os.path.exists(dest)
 
 def build_composite_walkaround(photo_paths, heygen_path, output_path, vehicle_name="", price="", dealer_name=""):
-    '''
-    THE REAL WALKAROUND VIDEO:
-    Vehicle photos fill 9:16 frame. Aaron composited on top - background removed by HeyGen.
-    He appears physically present next to the actual car from the listing.
-    '''
+    '''Real walkaround: vehicle photos fill frame, Aaron composited in with background removed.'''
     n_photos = len(photo_paths)
     if n_photos == 0:
         raise RuntimeError('No photos provided')
@@ -44,19 +40,16 @@ def build_composite_walkaround(photo_paths, heygen_path, output_path, vehicle_na
     probe_cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', heygen_path]
     probe_r = subprocess.run(probe_cmd, capture_output=True, text=True)
     has_alpha = False
-    n_video_streams = 0
     try:
         streams = json.loads(probe_r.stdout).get('streams', [])
         for s in streams:
-            if s.get('codec_type') == 'video':
-                n_video_streams += 1
             codec = s.get('codec_name', '')
             pix_fmt = s.get('pix_fmt', '')
             if codec in ('vp8', 'vp9', 'av1') or 'yuva' in pix_fmt:
                 has_alpha = True
     except Exception:
         pass
-    print('HeyGen file: ext={}, has_alpha={}, video_streams={}'.format(ext, has_alpha, n_video_streams))
+    print('HeyGen file: ext={}, has_alpha={}'.format(ext, has_alpha))
     with tempfile.TemporaryDirectory() as tmpdir:
         scaled_paths = []
         for i, p in enumerate(photo_paths):
@@ -97,39 +90,29 @@ def build_composite_walkaround(photo_paths, heygen_path, output_path, vehicle_na
         if vd:
             text_filters.append("drawtext=text='{}':fontcolor=white:fontsize=18:x=(w-text_w)/2:y=h-50:box=1:boxcolor=black@0.55:boxborderw=4".format(vd))
         text_chain = (','.join(text_filters) + ',') if text_filters else ''
-        if has_alpha and n_video_streams >= 2:
-            # VP9 WebM alpha: stream 0:v:0 = color, stream 0:v:1 = alpha mask
-            # Use alphamerge to properly composite Aaron onto vehicle photo
+        scale_str = str(aaron_w) + ':' + str(aaron_h) + ':force_original_aspect_ratio=decrease,pad=' + str(aaron_w) + ':' + str(aaron_h) + ':(ow-iw)/2:(oh-ih)/2'
+        ov_str = str(aaron_x) + ':' + str(aaron_y) + ':shortest=1[out]'
+        if has_alpha:
             fc = (
                 '[0:v]' + text_chain + 'setsar=1[bg];'
-                + '[1:v:0]scale=' + str(aaron_w) + ':' + str(aaron_h) + ':force_original_aspect_ratio=decrease,pad=' + str(aaron_w) + ':' + str(aaron_h) + ':(ow-iw)/2:(oh-ih)/2[color];'
-                + '[1:v:1]scale=' + str(aaron_w) + ':' + str(aaron_h) + ':force_original_aspect_ratio=decrease,pad=' + str(aaron_w) + ':' + str(aaron_h) + ':(ow-iw)/2:(oh-ih)/2[alpha];'
-                + '[color][alpha]alphamerge[av];'
-                + '[bg][av]overlay=' + str(aaron_x) + ':' + str(aaron_y) + ':shortest=1[out]'
-            )
-        elif has_alpha:
-            # VP9 yuva420p single stream: use alphaextract to properly remove background
-            # split into color and alpha channels, then alphamerge
-            fc = (
-                '[0:v]' + text_chain + 'setsar=1[bg];'
-                + '[1:v]scale=' + str(aaron_w) + ':' + str(aaron_h) + ':force_original_aspect_ratio=decrease,pad=' + str(aaron_w) + ':' + str(aaron_h) + ':(ow-iw)/2:(oh-ih)/2[av];'
+                + '[1:v]scale=' + scale_str + '[av];'
                 + '[av]split[avc][ava];[ava]alphaextract[alpha];[avc][alpha]alphamerge[avfinal];'
-                + '[bg][avfinal]overlay=' + str(aaron_x) + ':' + str(aaron_y) + ':shortest=1[out]'
+                + '[bg][avfinal]overlay=' + ov_str
             )
-                else:
-            # MP4 without alpha: try chroma key for common studio backgrounds
+        else:
             fc = (
                 '[0:v]' + text_chain + 'setsar=1[bg];'
-                + '[1:v]scale=' + str(aaron_w) + ':' + str(aaron_h) + ':force_original_aspect_ratio=decrease,pad=' + str(aaron_w) + ':' + str(aaron_h) + ':(ow-iw)/2:(oh-ih)/2[av];'
-                + '[bg][av]overlay=' + str(aaron_x) + ':' + str(aaron_y) + ':shortest=1[out]'
+                + '[1:v]scale=' + scale_str + '[av];'
+                + '[bg][av]overlay=' + ov_str
             )
         compose_cmd = ['ffmpeg', '-y', '-i', slideshow_path, '-i', heygen_path, '-filter_complex', fc, '-map', '[out]', '-map', '1:a', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '26', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-b:v', '1000k', '-maxrate', '1200k', '-bufsize', '1800k', '-threads', '2', '-shortest', output_path]
-        print('Compositing Aaron onto vehicle photos (alpha={}, streams={})...'.format(has_alpha, n_video_streams))
+        print('Compositing Aaron onto vehicle photos (alpha={})...'.format(has_alpha))
         r = subprocess.run(compose_cmd, capture_output=True, text=True, timeout=600)
         if r.returncode != 0:
-            print('Composite failed rc={}, trying simple overlay...'.format(r.returncode))
-            print('stderr: ' + r.stderr[-300:])
-            fc_simple = '[0:v]' + text_chain + 'setsar=1[bg];[1:v]scale=' + str(aaron_w) + ':' + str(aaron_h) + ':force_original_aspect_ratio=decrease,pad=' + str(aaron_w) + ':' + str(aaron_h) + ':(ow-iw)/2:(oh-ih)/2[av];[bg][av]overlay=' + str(aaron_x) + ':' + str(aaron_y) + ':shortest=1[out]'
+            print('Composite failed rc={}, stderr: {}'.format(r.returncode, r.stderr[-300:]))
+            fc_simple = (
+                '[0:v]' + text_chain + 'setsar=1[bg];[1:v]scale=' + scale_str + '[av];[bg][av]overlay=' + ov_str
+            )
             cmd2 = ['ffmpeg', '-y', '-i', slideshow_path, '-i', heygen_path, '-filter_complex', fc_simple, '-map', '[out]', '-map', '1:a', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '26', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-b:v', '1000k', '-maxrate', '1200k', '-bufsize', '1800k', '-threads', '2', '-shortest', output_path]
             r2 = subprocess.run(cmd2, capture_output=True, text=True, timeout=600)
             if r2.returncode != 0:
@@ -181,12 +164,7 @@ async def assemble_final_video(vehicle, heygen_video_url, output_dir, job_id):
     vehicle_name = vehicle.get('year_make_model', vehicle.get('name', ''))
     price = str(vehicle.get('price', '')).replace('$', '').replace(',', '')
     dealer_name = vehicle.get('dealer_name', 'Immaculate Used Cars')
-    build_composite_walkaround(
-        photo_paths, heygen_path, final_path,
-        vehicle_name=vehicle_name,
-        price=price,
-        dealer_name=dealer_name
-    )
+    build_composite_walkaround(photo_paths, heygen_path, final_path, vehicle_name=vehicle_name, price=price, dealer_name=dealer_name)
     for p in photo_paths:
         try:
             os.remove(p)
