@@ -29,26 +29,35 @@ def prescale_photo(src, dest):
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     return r.returncode == 0 and os.path.exists(dest)
 
-def build_composite_walkaround(photo_paths, heygen_path, output_path, vehicle_name="", price="", dealer_name=""):
-    '''Real walkaround: vehicle photos fill frame, Aaron composited in with background removed.'''
+def check_has_alpha(path):
+    """Check if video file has alpha channel (VP9/WebM yuva420p)."""
+    probe_cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', path]
+    probe_r = subprocess.run(probe_cmd, capture_output=True, text=True)
+    has_alpha = False
+    n_streams = 0
+    try:
+        streams = json.loads(probe_r.stdout).get('streams', [])
+        for s in streams:
+            if s.get('codec_type') == 'video':
+                n_streams += 1
+            codec = s.get('codec_name', '')
+            pix_fmt = s.get('pix_fmt', '')
+            if 'yuva' in pix_fmt or codec in ('vp8', 'vp9', 'av1'):
+                has_alpha = True
+    except Exception:
+        pass
+    print('Alpha check: has_alpha={}, n_video_streams={}'.format(has_alpha, n_streams))
+    return has_alpha
+
+def build_composite_walkaround(photo_paths, heygen_path, output_path, vehicle_name='', price='', dealer_name=''):
+    '''Real walkaround: vehicle photos fill frame, Aaron composited in with transparent WebM alpha.'''
     n_photos = len(photo_paths)
     if n_photos == 0:
         raise RuntimeError('No photos provided')
     duration = get_video_duration(heygen_path)
     print('HeyGen avatar duration: {}s, photos: {}'.format(round(duration,1), n_photos))
     ext = os.path.splitext(heygen_path)[1].lower()
-    probe_cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', heygen_path]
-    probe_r = subprocess.run(probe_cmd, capture_output=True, text=True)
-    has_alpha = False
-    try:
-        streams = json.loads(probe_r.stdout).get('streams', [])
-        for s in streams:
-            codec = s.get('codec_name', '')
-            pix_fmt = s.get('pix_fmt', '')
-            if codec in ('vp8', 'vp9', 'av1') or 'yuva' in pix_fmt:
-                has_alpha = True
-    except Exception:
-        pass
+    has_alpha = check_has_alpha(heygen_path)
     print('HeyGen file: ext={}, has_alpha={}'.format(ext, has_alpha))
     with tempfile.TemporaryDirectory() as tmpdir:
         scaled_paths = []
@@ -68,7 +77,13 @@ def build_composite_walkaround(photo_paths, heygen_path, output_path, vehicle_na
                 f.write("file '{}'\nduration {}\n".format(p, round(per_photo, 2)))
             f.write("file '{}'\n".format(scaled_paths[-1]))
         slideshow_path = os.path.join(tmpdir, 'slideshow.mp4')
-        slide_cmd = ['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', listf, '-vf', 'fps=15,setsar=1', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '30', '-pix_fmt', 'yuv420p', '-t', str(int(duration) + 2), '-threads', '1', '-b:v', '600k', '-maxrate', '700k', '-bufsize', '1000k', slideshow_path]
+        slide_cmd = ['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', listf,
+                     '-vf', 'fps=15,setsar=1',
+                     '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '30',
+                     '-pix_fmt', 'yuv420p',
+                     '-t', str(int(duration) + 2),
+                     '-threads', '1', '-b:v', '600k', '-maxrate', '700k', '-bufsize', '1000k',
+                     slideshow_path]
         print('Building slideshow: {} photos at {}s each'.format(len(scaled_paths), round(per_photo,1)))
         r = subprocess.run(slide_cmd, capture_output=True, text=True, timeout=600)
         if r.returncode != 0:
@@ -78,8 +93,8 @@ def build_composite_walkaround(photo_paths, heygen_path, output_path, vehicle_na
         vn = safe(vehicle_name)
         vp = safe(price)
         vd = safe(dealer_name)
-        aaron_h = int(1280 * 0.60)
-        aaron_w = int(720 * 0.60)
+        aaron_h = int(1280 * 0.65)
+        aaron_w = int(720 * 0.70)
         aaron_x = int((720 - aaron_w) / 2)
         aaron_y = 1280 - aaron_h
         text_filters = []
@@ -92,11 +107,13 @@ def build_composite_walkaround(photo_paths, heygen_path, output_path, vehicle_na
         text_chain = (','.join(text_filters) + ',') if text_filters else ''
         scale_str = str(aaron_w) + ':' + str(aaron_h) + ':force_original_aspect_ratio=decrease'
         ov_str = str(aaron_x) + ':' + str(aaron_y) + ':shortest=1[out]'
+        # VP9 WebM with yuva420p: preserve alpha through format+scale pipeline
+        # overlay filter natively uses alpha channel - NO colorkey needed
         if has_alpha:
             fc = (
                 '[0:v]' + text_chain + 'setsar=1[bg];'
-                + '[1:v]scale=' + scale_str + '[av];'
-                + '[av]colorkey=0x000000:0.35:0.1[avfinal];' + '[bg][avfinal]overlay=' + ov_str
+                + '[1:v]format=yuva420p,scale=' + scale_str + ',format=yuva420p[av];'
+                + '[bg][av]overlay=' + ov_str
             )
         else:
             fc = (
@@ -104,19 +121,40 @@ def build_composite_walkaround(photo_paths, heygen_path, output_path, vehicle_na
                 + '[1:v]scale=' + scale_str + '[av];'
                 + '[bg][av]overlay=' + ov_str
             )
-        compose_cmd = ['ffmpeg', '-y', '-i', slideshow_path, '-i', heygen_path, '-filter_complex', fc, '-map', '[out]', '-map', '1:a', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '26', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-b:v', '1000k', '-maxrate', '1200k', '-bufsize', '1800k', '-threads', '2', '-shortest', output_path]
+        compose_cmd = ['ffmpeg', '-y',
+                       '-i', slideshow_path,
+                       '-i', heygen_path,
+                       '-filter_complex', fc,
+                       '-map', '[out]', '-map', '1:a',
+                       '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '26',
+                       '-pix_fmt', 'yuv420p',
+                       '-c:a', 'aac', '-b:a', '128k',
+                       '-b:v', '1000k', '-maxrate', '1200k', '-bufsize', '1800k',
+                       '-threads', '2', '-shortest', output_path]
         print('Compositing Aaron onto vehicle photos (alpha={})...'.format(has_alpha))
         r = subprocess.run(compose_cmd, capture_output=True, text=True, timeout=600)
         if r.returncode != 0:
-            print('Composite failed rc={}, stderr: {}'.format(r.returncode, r.stderr[-300:]))
+            print('Composite cmd: {}'.format(' '.join(compose_cmd)))
+            print('Composite stderr: {}'.format(r.stderr[-500:]))
+            # Fallback: try without alpha (plain overlay, no background removal)
+            print('Trying fallback composite without alpha...')
             fc_simple = (
                 '[0:v]' + text_chain + 'setsar=1[bg];[1:v]scale=' + scale_str + '[av];[bg][av]overlay=' + ov_str
             )
-            cmd2 = ['ffmpeg', '-y', '-i', slideshow_path, '-i', heygen_path, '-filter_complex', fc_simple, '-map', '[out]', '-map', '1:a', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '26', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-b:v', '1000k', '-maxrate', '1200k', '-bufsize', '1800k', '-threads', '2', '-shortest', output_path]
+            cmd2 = ['ffmpeg', '-y',
+                    '-i', slideshow_path,
+                    '-i', heygen_path,
+                    '-filter_complex', fc_simple,
+                    '-map', '[out]', '-map', '1:a',
+                    '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '26',
+                    '-pix_fmt', 'yuv420p',
+                    '-c:a', 'aac', '-b:a', '128k',
+                    '-b:v', '1000k', '-maxrate', '1200k', '-bufsize', '1800k',
+                    '-threads', '2', '-shortest', output_path]
             r2 = subprocess.run(cmd2, capture_output=True, text=True, timeout=600)
             if r2.returncode != 0:
                 raise RuntimeError('Composite fallback failed rc={}: {}'.format(r2.returncode, r2.stderr[-400:]))
-    return output_path
+        return output_path
 
 async def assemble_final_video(vehicle, heygen_video_url, output_dir, job_id):
     os.makedirs(output_dir, exist_ok=True)
@@ -134,13 +172,13 @@ async def assemble_final_video(vehicle, heygen_video_url, output_dir, job_id):
             new_path = os.path.join(output_dir, job_id + '_heygen.webm')
             if heygen_path != new_path:
                 os.rename(heygen_path, new_path)
-                heygen_path = new_path
+            heygen_path = new_path
             print('Detected webm format')
         elif 'mp4' in fmt_name or 'mov' in fmt_name:
             new_path = os.path.join(output_dir, job_id + '_heygen.mp4')
             if heygen_path != new_path:
                 os.rename(heygen_path, new_path)
-                heygen_path = new_path
+            heygen_path = new_path
             print('Detected mp4 format')
     except Exception:
         pass
@@ -163,7 +201,8 @@ async def assemble_final_video(vehicle, heygen_video_url, output_dir, job_id):
     vehicle_name = vehicle.get('year_make_model', vehicle.get('name', ''))
     price = str(vehicle.get('price', '')).replace('$', '').replace(',', '')
     dealer_name = vehicle.get('dealer_name', 'Immaculate Used Cars')
-    build_composite_walkaround(photo_paths, heygen_path, final_path, vehicle_name=vehicle_name, price=price, dealer_name=dealer_name)
+    build_composite_walkaround(photo_paths, heygen_path, final_path,
+                               vehicle_name=vehicle_name, price=price, dealer_name=dealer_name)
     for p in photo_paths:
         try:
             os.remove(p)
