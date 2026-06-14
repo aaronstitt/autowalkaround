@@ -6,11 +6,12 @@ import time
 import random
 from typing import Optional
 
+# NOTE: No brotli (br) in Accept-Encoding since requests doesn't support it natively
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
+    "Accept-Encoding": "gzip, deflate",
     "Connection": "keep-alive",
     "Upgrade-Insecure-Requests": "1",
     "Sec-Fetch-Dest": "document",
@@ -132,13 +133,20 @@ def scrape_vehicle_page(url: str) -> dict:
 
     vehicle["highlighted_features"] = highlighted[:19]
 
-    photo_pattern = re.compile(r'https://pictures\.dealer\.com/[^\s"' + "'" + r']+\.(?:jpg|png|jpeg)', re.I)
+    # Simple reliable photo regex - no single-quote escaping needed since we just avoid quotes and spaces
+    photo_pattern = re.compile(r'https://pictures\.dealer\.com/\S+?\.(?:jpg|png|jpeg)', re.I)
     all_photos = list(dict.fromkeys(photo_pattern.findall(html)))
-    vehicle["photos"] = [p for p in all_photos if 'thumb_' not in p]
+    # Strip trailing quote characters that might get captured
+    cleaned = []
+    for p in all_photos:
+        p = p.rstrip('"').rstrip("'").rstrip('>')
+        if 'thumb_' not in p:
+            cleaned.append(p)
+    vehicle["photos"] = cleaned
 
-    video_xml_match = re.search(r'https://videos\d*\.dealer\.com/clients/[^\s"' + "'" + r']+\.xml', html)
+    video_xml_match = re.search(r'https://videos\d*\.dealer\.com/clients/\S+?\.xml', html)
     if video_xml_match:
-        xml_url = video_xml_match.group(0)
+        xml_url = video_xml_match.group(0).rstrip('"').rstrip("'")
         video_base = xml_url.rsplit('/', 1)[0] + '/'
         try:
             xml_resp = _fetch_with_retry(xml_url)
