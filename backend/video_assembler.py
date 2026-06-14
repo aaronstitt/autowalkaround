@@ -96,8 +96,7 @@ def build_composite_walkaround(photo_paths, heygen_path, output_path, vehicle_na
             fc = (
                 '[0:v]' + text_chain + 'setsar=1[bg];'
                 + '[1:v]scale=' + scale_str + '[av];'
-                + '[av]split[avc][ava];[ava]alphaextract[alpha];[avc][alpha]alphamerge[avfinal];'
-                + '[bg][avfinal]overlay=' + ov_str
+                + '[av]colorkey=0x000000:0.35:0.1[avfinal];' + '[bg][avfinal]overlay=' + ov_str
             )
         else:
             fc = (
