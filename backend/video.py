@@ -2,6 +2,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel
+from typing import Optional
 import uuid, os, asyncio
 from auth import get_current_user
 from scraper import scrape_vehicle_page
@@ -18,6 +19,7 @@ PLAN_LIMITS = {'free': 999999, 'starter': 30, 'growth': 90, 'unlimited': 999999}
 class GenerateRequest(BaseModel):
     vehicle_url: str
     salesperson_id: str
+    page_html: Optional[str] = None  # Optional: HTML from frontend browser (bypasses server-side bot detection)
 
 @router.post('/generate')
 async def generate_video(req: GenerateRequest, background_tasks: BackgroundTasks, current_user: dict = Depends(get_current_user)):
@@ -38,16 +40,16 @@ async def generate_video(req: GenerateRequest, background_tasks: BackgroundTasks
     job_id = str(uuid.uuid4())
     row = {'id': job_id, 'dealership_id': dealership_id, 'user_id': current_user['sub'], 'salesperson_id': req.salesperson_id, 'vehicle_url': req.vehicle_url, 'status': 'queued', 'status_message': 'Queued'}
     supabase.table('video_jobs').insert(row).execute()
-    background_tasks.add_task(run_pipeline, job_id, req.vehicle_url, sp, dealership_id)
+    background_tasks.add_task(run_pipeline, job_id, req.vehicle_url, sp, dealership_id, req.page_html)
     return {'job_id': job_id, 'status': 'queued', 'message': 'Video generation started. Usually 5-10 minutes.'}
 
-async def run_pipeline(job_id, vehicle_url, salesperson, dealership_id):
+async def run_pipeline(job_id, vehicle_url, salesperson, dealership_id, page_html=None):
     def upd(s, m=''):
         supabase.table('video_jobs').update({'status': s, 'status_message': m}).eq('id', job_id).execute()
     try:
         upd('scraping', 'Scraping vehicle listing...')
         loop = asyncio.get_event_loop()
-        vehicle = await loop.run_in_executor(None, scrape_vehicle_page, vehicle_url)
+        vehicle = await loop.run_in_executor(None, lambda: scrape_vehicle_page(vehicle_url, page_html))
         if not vehicle.get('photos'):
             raise ValueError('No photos found on this vehicle listing page.')
         upd('scripting', 'Writing AI walkaround script...')
