@@ -29,37 +29,37 @@ def prescale_photo(src, dest):
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     return r.returncode == 0 and os.path.exists(dest)
 
-def check_has_alpha(path):
-    """Check if video file has alpha channel (VP9/WebM yuva420p)."""
+def check_video_info(path):
+    """Get video codec and pixel format info."""
     probe_cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', path]
     probe_r = subprocess.run(probe_cmd, capture_output=True, text=True)
     has_alpha = False
+    pix_fmt = ''
+    codec = ''
     try:
         streams = json.loads(probe_r.stdout).get('streams', [])
         for s in streams:
-            pix_fmt = s.get('pix_fmt', '')
-            codec = s.get('codec_name', '')
-            if 'yuva' in pix_fmt:
-                has_alpha = True
-                print('Alpha confirmed via pix_fmt={}'.format(pix_fmt))
-            elif codec in ('vp8', 'vp9') and s.get('codec_type') == 'video':
-                # VP9 may carry alpha even if ffprobe doesn't show yuva
-                has_alpha = True
-                print('Alpha assumed: VP9 video stream (HeyGen webm)')
+            if s.get('codec_type') == 'video':
+                pix_fmt = s.get('pix_fmt', '')
+                codec = s.get('codec_name', '')
+                if 'yuva' in pix_fmt:
+                    has_alpha = True
+                elif codec in ('vp8', 'vp9'):
+                    has_alpha = True
     except Exception as e:
-        print('Alpha check error: {}'.format(e))
-    return has_alpha
+        print('Video info error: {}'.format(e))
+    print('Video info: codec={}, pix_fmt={}, has_alpha={}'.format(codec, pix_fmt, has_alpha))
+    return has_alpha, pix_fmt, codec
 
 def build_composite_walkaround(photo_paths, heygen_path, output_path, vehicle_name='', price='', dealer_name=''):
-    '''Real walkaround: vehicle photos fill frame, Aaron composited with proper alpha.'''
+    '''Real walkaround: vehicle photos fill frame, Aaron composited with background removed.'''
     n_photos = len(photo_paths)
     if n_photos == 0:
         raise RuntimeError('No photos provided')
     duration = get_video_duration(heygen_path)
     print('HeyGen avatar duration: {}s, photos: {}'.format(round(duration,1), n_photos))
     ext = os.path.splitext(heygen_path)[1].lower()
-    has_alpha = check_has_alpha(heygen_path)
-    print('HeyGen file: ext={}, has_alpha={}'.format(ext, has_alpha))
+    has_alpha, pix_fmt, codec = check_video_info(heygen_path)
     with tempfile.TemporaryDirectory() as tmpdir:
         scaled_paths = []
         for i, p in enumerate(photo_paths):
@@ -108,15 +108,14 @@ def build_composite_walkaround(photo_paths, heygen_path, output_path, vehicle_na
         text_chain = (','.join(text_filters) + ',') if text_filters else ''
         scale_str = str(aaron_w) + ':' + str(aaron_h) + ':force_original_aspect_ratio=decrease'
         ov_str = str(aaron_x) + ':' + str(aaron_y) + ':shortest=1[out]'
+        # For VP9 WebM: use colorkey with tight threshold to remove studio pure-black
+        # Threshold 0.18 removes near-black studio BG without affecting Aaron's dark beard
         if has_alpha:
-            # Split VP9 alpha: extract color+alpha separately, scale both, merge back
-            # This is the correct approach for VP9 yuva420p WebM compositing
             fc = (
                 '[0:v]' + text_chain + 'setsar=1[bg];'
-                + '[1:v]scale=' + scale_str + '[avcolor];'
-                + '[1:v]alphaextract,scale=' + scale_str + '[avalpha];'
-                + '[avcolor][avalpha]alphamerge[av];'
-                + '[bg][av]overlay=' + ov_str
+                + '[1:v]scale=' + scale_str + '[av];'
+                + '[av]colorkey=0x000000:0.18:0.05[avfinal];'
+                + '[bg][avfinal]overlay=' + ov_str
             )
         else:
             fc = (
@@ -134,23 +133,18 @@ def build_composite_walkaround(photo_paths, heygen_path, output_path, vehicle_na
                        '-c:a', 'aac', '-b:a', '128k',
                        '-b:v', '1000k', '-maxrate', '1200k', '-bufsize', '1800k',
                        '-threads', '2', '-shortest', output_path]
-        print('Compositing Aaron onto vehicle photos (alpha={})...'.format(has_alpha))
-        print('Filter complex: {}'.format(fc[:200]))
+        print('Compositing Aaron onto vehicle photos (alpha={}, pix_fmt={})...'.format(has_alpha, pix_fmt))
         r = subprocess.run(compose_cmd, capture_output=True, text=True, timeout=600)
         if r.returncode != 0:
-            print('Composite stderr: {}'.format(r.stderr[-600:]))
-            # Fallback: try without alpha (plain overlay, no background removal)
-            print('Trying colorkey fallback (backup plan)...')
-            fc_ck = (
-                '[0:v]' + text_chain + 'setsar=1[bg];'
-                + '[1:v]scale=' + scale_str + '[av];'
-                + '[av]colorkey=0x111111:0.4:0.05[avfinal];'
-                + '[bg][avfinal]overlay=' + ov_str
+            print('Composite stderr: {}'.format(r.stderr[-400:]))
+            # Fallback: plain overlay without chromakey
+            fc_plain = (
+                '[0:v]' + text_chain + 'setsar=1[bg];[1:v]scale=' + scale_str + '[av];[bg][av]overlay=' + ov_str
             )
             cmd2 = ['ffmpeg', '-y',
                     '-i', slideshow_path,
                     '-i', heygen_path,
-                    '-filter_complex', fc_ck,
+                    '-filter_complex', fc_plain,
                     '-map', '[out]', '-map', '1:a',
                     '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '26',
                     '-pix_fmt', 'yuv420p',
@@ -159,24 +153,7 @@ def build_composite_walkaround(photo_paths, heygen_path, output_path, vehicle_na
                     '-threads', '2', '-shortest', output_path]
             r2 = subprocess.run(cmd2, capture_output=True, text=True, timeout=600)
             if r2.returncode != 0:
-                print('Colorkey fallback stderr: {}'.format(r2.stderr[-400:]))
-                # Final fallback: plain overlay no background removal
-                fc_plain = (
-                    '[0:v]' + text_chain + 'setsar=1[bg];[1:v]scale=' + scale_str + '[av];[bg][av]overlay=' + ov_str
-                )
-                cmd3 = ['ffmpeg', '-y',
-                        '-i', slideshow_path,
-                        '-i', heygen_path,
-                        '-filter_complex', fc_plain,
-                        '-map', '[out]', '-map', '1:a',
-                        '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '26',
-                        '-pix_fmt', 'yuv420p',
-                        '-c:a', 'aac', '-b:a', '128k',
-                        '-b:v', '1000k', '-maxrate', '1200k', '-bufsize', '1800k',
-                        '-threads', '2', '-shortest', output_path]
-                r3 = subprocess.run(cmd3, capture_output=True, text=True, timeout=600)
-                if r3.returncode != 0:
-                    raise RuntimeError('All composite attempts failed: {}'.format(r3.stderr[-400:]))
+                raise RuntimeError('Composite fallback failed rc={}: {}'.format(r2.returncode, r2.stderr[-400:]))
         return output_path
 
 async def assemble_final_video(vehicle, heygen_video_url, output_dir, job_id):
