@@ -1,4 +1,4 @@
-import os, requests, tempfile, subprocess, json
+import os, requests, tempfile, subprocess, json, shutil
 
 HEADERS = {'User-Agent': 'Mozilla/5.0'}
 
@@ -32,28 +32,48 @@ def get_video_dimensions(path):
         return 1080, 1920
 
 def _simple_slideshow(photo_paths, output_path, total_duration, width=1080, height=1920):
+    """Create a simple slideshow from images using ffmpeg concat filter (more robust than concat demuxer)."""
     n = len(photo_paths)
     per_photo = total_duration / n
-    with tempfile.TemporaryDirectory() as tmpdir:
-        list_file = os.path.join(tmpdir, 'photos.txt')
-        with open(list_file, 'w') as f:
-            for p in photo_paths:
-                f.write(f"file '{p}'\nduration {round(per_photo, 2)}\n")
-            f.write(f"file '{photo_paths[-1]}'\n")
-        cmd = ['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', list_file,
-               '-vf', f'scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},setsar=1',
-               '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
-               '-pix_fmt', 'yuv420p', '-r', '30', '-t', str(total_duration), output_path]
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
-        if r.returncode != 0:
-            raise RuntimeError('Simple slideshow failed: ' + r.stderr[:400])
-        return output_path
+    
+    # Use input loop approach - more compatible than concat demuxer
+    # Build filter_complex that concatenates images
+    inputs = []
+    filter_parts = []
+    concat_inputs = []
+    
+    for i, p in enumerate(photo_paths):
+        inputs += ['-loop', '1', '-t', str(round(per_photo, 2)), '-i', p]
+        filter_parts.append(
+            f'[{i}:v]scale={width}:{height}:force_original_aspect_ratio=increase,'
+            f'crop={width}:{height},setsar=1,fps=25[s{i}]'
+        )
+        concat_inputs.append(f'[s{i}]')
+    
+    filter_complex = ';'.join(filter_parts) + ';' + ''.join(concat_inputs) + f'concat=n={n}:v=1:a=0[outv]'
+    
+    cmd = ['ffmpeg', '-y'] + inputs + [
+        '-filter_complex', filter_complex,
+        '-map', '[outv]',
+        '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+        '-pix_fmt', 'yuv420p', '-r', '25', '-t', str(total_duration),
+        output_path
+    ]
+    
+    print(f'Simple slideshow: {len(photo_paths)} photos, {total_duration:.1f}s total')
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    if r.returncode != 0:
+        # Log full error for debugging
+        full_err = (r.stderr or '')[-800:]
+        print(f'Simple slideshow STDERR: {full_err}')
+        raise RuntimeError('Simple slideshow failed: ' + full_err[:400])
+    return output_path
 
 def build_pov_background(photo_paths, output_path, total_duration, width=1080, height=1920):
     if not photo_paths:
         raise ValueError('No photos to build background from')
     n = len(photo_paths)
-    fps = 30
+    fps = 25
     per_photo = total_duration / n
     frames_per = max(int(per_photo * fps), fps)
     inputs = []
@@ -63,13 +83,13 @@ def build_pov_background(photo_paths, output_path, total_duration, width=1080, h
         inputs += ['-loop', '1', '-t', str(per_photo + 1.0), '-i', photo]
         effect = i % 4
         if effect == 0:
-            zp = f'zoompan=z=min(zoom+0.0008\\,1.3):x=iw/2-(iw/zoom/2):y=ih/2-(ih/zoom/2):d={frames_per}:s={width}x{height}:fps={fps}'
+            zp = f'zoompan=z=min(zoom+0.0008\,1.3):x=iw/2-(iw/zoom/2):y=ih/2-(ih/zoom/2):d={frames_per}:s={width}x{height}:fps={fps}'
         elif effect == 1:
             zp = f'zoompan=z=1.25:x=iw*0.15*(1-on/{frames_per}):y=ih/2-(ih/zoom/2):d={frames_per}:s={width}x{height}:fps={fps}'
         elif effect == 2:
             zp = f'zoompan=z=1.25:x=iw*0.15*(on/{frames_per}):y=ih/2-(ih/zoom/2):d={frames_per}:s={width}x{height}:fps={fps}'
         else:
-            zp = f'zoompan=z=max(zoom-0.0006\\,1.0):x=iw/2-(iw/zoom/2):y=ih*0.45-(ih/zoom/2):d={frames_per}:s={width}x{height}:fps={fps}'
+            zp = f'zoompan=z=max(zoom-0.0006\,1.0):x=iw/2-(iw/zoom/2):y=ih*0.45-(ih/zoom/2):d={frames_per}:s={width}x{height}:fps={fps}'
         filt = f'[{i}:v]scale={width*2}:{height*2}:force_original_aspect_ratio=increase,crop={width*2}:{height*2},{zp},setsar=1[v{i}]'
         filter_parts.append(filt)
         concat_parts.append(f'[v{i}]')
@@ -79,7 +99,8 @@ def build_pov_background(photo_paths, output_path, total_duration, width=1080, h
            '-pix_fmt', 'yuv420p', '-r', str(fps), '-t', str(total_duration), output_path]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=480)
     if r.returncode != 0:
-        print(f'Ken Burns failed, using simple slideshow: {r.stderr[:300]}')
+        print(f'Ken Burns failed (stderr tail): {r.stderr[-300:]}')
+        print('Falling back to simple slideshow...')
         return _simple_slideshow(photo_paths, output_path, total_duration, width, height)
     return output_path
 
@@ -99,7 +120,7 @@ def composite_avatar_on_background(heygen_path, bg_path, output_path, width=1080
            '-shortest', output_path]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=360)
     if r.returncode != 0:
-        raise RuntimeError('Composite failed: ' + r.stderr[:600])
+        raise RuntimeError('Composite failed: ' + r.stderr[-600:])
     return output_path
 
 def add_text_overlays(video_path, output_path, vehicle_name, price, dealer_name):
@@ -116,7 +137,6 @@ def add_text_overlays(video_path, output_path, vehicle_name, price, dealer_name)
     if vdealer:
         drawtext_filters.append(f"drawtext=text='{vdealer}':fontcolor=white:fontsize=22:x=(w-text_w)/2:y=h-68:box=1:boxcolor=black@0.65:boxborderw=6")
     if not drawtext_filters:
-        import shutil
         shutil.copy(video_path, output_path)
         return output_path
     vf = ','.join(drawtext_filters)
@@ -125,7 +145,7 @@ def add_text_overlays(video_path, output_path, vehicle_name, price, dealer_name)
            '-pix_fmt', 'yuv420p', '-c:a', 'copy', output_path]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
     if r.returncode != 0:
-        raise RuntimeError('Text overlay failed: ' + r.stderr[:500])
+        raise RuntimeError('Text overlay failed: ' + r.stderr[-500:])
     return output_path
 
 def download_vehicle_photos(photo_urls, tmpdir, max_photos=16):
@@ -156,7 +176,7 @@ async def assemble_final_video(vehicle, heygen_video_url, output_dir, job_id):
     int_features = vehicle.get('interior_features', [])
     total_features = max(len(ext_features) + len(int_features), 1)
     ext_ratio = len(ext_features) / total_features
-    n_photos = min(len(all_photos), 16)
+    n_photos = min(len(all_photos), 12)
     n_ext_photos = max(int(n_photos * ext_ratio), 2)
     n_int_photos = max(n_photos - n_ext_photos, 2)
     ordered_urls = all_photos[:n_ext_photos] + all_photos[n_ext_photos:n_ext_photos + n_int_photos]
@@ -166,6 +186,6 @@ async def assemble_final_video(vehicle, heygen_video_url, output_dir, job_id):
             raise ValueError('Failed to download any vehicle photos')
         print(f'Downloaded {len(downloaded)} vehicle photos')
         build_pov_background(downloaded, bg_path, duration)
-    composite_avatar_on_background(heygen_path, bg_path, composite_path)
-    add_text_overlays(composite_path, final_path, vehicle.get('name', ''), vehicle.get('price', ''), vehicle.get('dealer_name', ''))
+        composite_avatar_on_background(heygen_path, bg_path, composite_path)
+        add_text_overlays(composite_path, final_path, vehicle.get('name', ''), vehicle.get('price', ''), vehicle.get('dealer_name', ''))
     return final_path
