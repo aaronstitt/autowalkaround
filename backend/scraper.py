@@ -2,10 +2,22 @@ import requests
 from bs4 import BeautifulSoup
 import re
 import json
+import time
+import random
 from typing import Optional
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Cache-Control": "max-age=0",
 }
 
 INTERIOR_KEYWORDS = [
@@ -21,15 +33,53 @@ EXTERIOR_KEYWORDS = [
     "auto high-beam", "heated door mirror", "power liftgate", "exterior", "paint"
 ]
 
+
+def _fetch_with_retry(url: str, max_retries: int = 4, timeout: int = 20) -> requests.Response:
+    """Fetch URL with exponential backoff retry on 429/5xx errors."""
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    base_url = "/".join(url.split("/")[:3])
+    session.headers["Referer"] = base_url + "/"
+
+    for attempt in range(max_retries):
+        try:
+            if attempt > 0:
+                wait = (2 ** attempt) + random.uniform(1.0, 3.0)
+                time.sleep(wait)
+            else:
+                time.sleep(random.uniform(0.5, 1.5))
+
+            resp = session.get(url, timeout=timeout, allow_redirects=True)
+
+            if resp.status_code == 429:
+                retry_after = int(resp.headers.get("Retry-After", 5))
+                wait = max(retry_after, 5) + random.uniform(1.0, 3.0)
+                time.sleep(wait)
+                continue
+
+            resp.raise_for_status()
+            return resp
+
+        except requests.exceptions.HTTPError as e:
+            if attempt == max_retries - 1:
+                raise
+            continue
+        except requests.exceptions.ConnectionError:
+            if attempt == max_retries - 1:
+                raise
+            time.sleep(2 ** attempt)
+            continue
+
+    raise requests.exceptions.RetryError(f"Failed to fetch {url} after {max_retries} attempts")
+
+
 def scrape_vehicle_page(url: str) -> dict:
-    resp = requests.get(url, headers=HEADERS, timeout=15)
-    resp.raise_for_status()
+    resp = _fetch_with_retry(url)
     soup = BeautifulSoup(resp.text, "html.parser")
     html = resp.text
 
     vehicle = {}
 
-    # JSON-LD structured data
     for script in soup.find_all("script", type="application/ld+json"):
         try:
             data = json.loads(script.string)
@@ -55,12 +105,10 @@ def scrape_vehicle_page(url: str) -> dict:
         except Exception:
             continue
 
-    # Mileage
-    mileage_match = re.search(r'([d,]+)\s*miles', html, re.I)
+    mileage_match = re.search(r'([\d,]+)\s*miles', html, re.I)
     if mileage_match:
         vehicle["mileage"] = mileage_match.group(0)
 
-    # Highlighted features - look for the section in HTML
     highlighted = []
     features_header = soup.find(string=re.compile("Highlighted Features", re.I))
     if features_header:
@@ -77,7 +125,6 @@ def scrape_vehicle_page(url: str) -> dict:
                         break
                 container = container.parent
 
-    # Fallback: extract from script JSON
     if not highlighted:
         match = re.search(r'"highlights":\s*\[([^\]]+)\]', html)
         if match:
@@ -85,18 +132,16 @@ def scrape_vehicle_page(url: str) -> dict:
 
     vehicle["highlighted_features"] = highlighted[:19]
 
-    # All photos
-    photo_pattern = re.compile(r'https://pictures\.dealer\.com/[^\s"\']+\.(?:jpg|png|jpeg)', re.I)
+    photo_pattern = re.compile(r'https://pictures\.dealer\.com/[^\s"' + "'" + r']+\.(?:jpg|png|jpeg)', re.I)
     all_photos = list(dict.fromkeys(photo_pattern.findall(html)))
     vehicle["photos"] = [p for p in all_photos if 'thumb_' not in p]
 
-    # Video URL
-    video_xml_match = re.search(r'https://videos\d*\.dealer\.com/clients/[^\s"\']+\.xml', html)
+    video_xml_match = re.search(r'https://videos\d*\.dealer\.com/clients/[^\s"' + "'" + r']+\.xml', html)
     if video_xml_match:
         xml_url = video_xml_match.group(0)
         video_base = xml_url.rsplit('/', 1)[0] + '/'
         try:
-            xml_resp = requests.get(xml_url, headers=HEADERS, timeout=10)
+            xml_resp = _fetch_with_retry(xml_url)
             h264_match = re.search(r'h264_high_src="([^"]+)"', xml_resp.text)
             vehicle["video_url"] = video_base + h264_match.group(1) if h264_match else None
         except Exception:
@@ -104,11 +149,9 @@ def scrape_vehicle_page(url: str) -> dict:
     else:
         vehicle["video_url"] = None
 
-    # 360 view
     vin = vehicle.get("vin", "")
     vehicle["spin_360_url"] = f"https://next.carketa.app/vin/{vin}" if vin else None
 
-    # Categorize features
     interior_features, exterior_features = [], []
     for feature in vehicle.get("highlighted_features", []):
         fl = feature.lower()
