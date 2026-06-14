@@ -83,15 +83,21 @@ def get_look_id_for_avatar(avatar_group_id):
     return avatar_group_id
 
 def create_multiscene_avatar_video(avatar_id, voice_id, script_data, ext_photo_url=None, int_photo_url=None, lot_bg_url=None, width=720, height=1280):
-    """Create HeyGen video requesting transparent webm so we can composite Aaron onto vehicle photos."""
+    """Create HeyGen video as plain MP4 (full-screen talking head).
+    We no longer need transparent webm - the assembly pipeline uses Aaron as
+    full-screen intro/outro with vehicle photos/video as the main content.
+    """
     exterior_script = script_data.get('exterior_script', '')
     interior_script = script_data.get('interior_script', '')
     full_script = script_data.get('full_script', '')
     look_id = get_look_id_for_avatar(avatar_id)
     print(f'Using look_id: {look_id} for avatar_group: {avatar_id}')
+
     script_to_use = full_script
     if exterior_script and interior_script:
         script_to_use = exterior_script + ' ' + interior_script
+
+    # Request plain MP4 - no transparency needed, Aaron is full-screen segments
     payload = {
         'type': 'avatar',
         'avatar_id': look_id,
@@ -99,27 +105,14 @@ def create_multiscene_avatar_video(avatar_id, voice_id, script_data, ext_photo_u
         'voice_id': voice_id,
         'resolution': '720p',
         'aspect_ratio': '9:16',
-        'output_format': 'webm',
+        'output_format': 'mp4',
     }
-    print(f'Creating HeyGen transparent webm...')
+    print(f'Creating HeyGen MP4 talking head video...')
     resp = requests.post(f'{HEYGEN_BASE}/v3/videos', headers=get_headers(), json=payload)
     print(f'HeyGen V3 create response {resp.status_code}: {resp.text[:500]}')
     if resp.status_code != 200:
-        print('Webm failed, trying mp4 + remove_background...')
-        payload_fallback = {
-            'type': 'avatar',
-            'avatar_id': look_id,
-            'script': script_to_use,
-            'voice_id': voice_id,
-            'resolution': '720p',
-            'aspect_ratio': '9:16',
-            'remove_background': True,
-            'output_format': 'mp4',
-        }
-        resp = requests.post(f'{HEYGEN_BASE}/v3/videos', headers=get_headers(), json=payload_fallback)
-        print(f'HeyGen fallback response {resp.status_code}: {resp.text[:500]}')
-        if resp.status_code != 200:
-            raise RuntimeError(f'HeyGen create failed: {resp.status_code}: {resp.text[:300]}')
+        raise RuntimeError(f'HeyGen create failed: {resp.status_code}: {resp.text[:300]}')
+
     data = resp.json().get('data', {})
     video_id = data.get('video_id')
     if not video_id:
