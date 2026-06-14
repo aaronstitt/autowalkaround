@@ -22,87 +22,62 @@ def get_video_duration(path):
     except Exception:
         return 60.0
 
-def get_video_dimensions(path):
-    cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', '-select_streams', 'v:0', path]
-    r = subprocess.run(cmd, capture_output=True, text=True)
-    try:
-        s = json.loads(r.stdout)['streams'][0]
-        return int(s['width']), int(s['height'])
-    except Exception:
-        return 1080, 1920
+def convert_to_jpeg(src, dest):
+    """Convert any image format to JPEG for ffmpeg compatibility."""
+    cmd = ['ffmpeg', '-y', '-i', src, '-vf', 'scale=iw:ih', '-q:v', '2', dest]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    return r.returncode == 0 and os.path.exists(dest)
 
 def _simple_slideshow(photo_paths, output_path, total_duration, width=1080, height=1920):
-    """Create a simple slideshow from images using ffmpeg concat filter (more robust than concat demuxer)."""
+    """Create slideshow from images. Converts to JPEG first for max compatibility."""
     n = len(photo_paths)
-    per_photo = total_duration / n
+    per_photo = max(total_duration / n, 1.0)
     
-    # Use input loop approach - more compatible than concat demuxer
-    # Build filter_complex that concatenates images
-    inputs = []
-    filter_parts = []
-    concat_inputs = []
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Convert all images to JPEG for ffmpeg compatibility
+        jpeg_paths = []
+        for i, p in enumerate(photo_paths):
+            jpg_dest = os.path.join(tmpdir, f'img_{i:03d}.jpg')
+            if convert_to_jpeg(p, jpg_dest):
+                jpeg_paths.append(jpg_dest)
+            else:
+                print(f'Warning: failed to convert {p} to JPEG, skipping')
+        
+        if not jpeg_paths:
+            raise RuntimeError('No images could be converted to JPEG')
+        
+        n = len(jpeg_paths)
+        per_photo = total_duration / n
+        
+        # Write concat list file
+        list_file = os.path.join(tmpdir, 'photos.txt')
+        with open(list_file, 'w') as f:
+            for p in jpeg_paths:
+                f.write(f"file '{p}'\nduration {round(per_photo, 2)}\n")
+            # Add last file again (required by concat demuxer)
+            f.write(f"file '{jpeg_paths[-1]}'\n")
+        
+        cmd = ['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', list_file,
+               '-vf', f'scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},setsar=1',
+               '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+               '-pix_fmt', 'yuv420p', '-r', '25', '-t', str(total_duration), output_path]
+        
+        print(f'Slideshow: {n} photos, {total_duration:.1f}s')
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if r.returncode != 0:
+            err_start = r.stderr[:300]
+            err_end = r.stderr[-300:]
+            full_err = f'START: {err_start}...END: {err_end}'
+            print(f'Slideshow STDERR: {full_err}')
+            raise RuntimeError(f'Slideshow failed (rc={r.returncode}): ' + r.stderr[-300:])
     
-    for i, p in enumerate(photo_paths):
-        inputs += ['-loop', '1', '-t', str(round(per_photo, 2)), '-i', p]
-        filter_parts.append(
-            f'[{i}:v]scale={width}:{height}:force_original_aspect_ratio=increase,'
-            f'crop={width}:{height},setsar=1,fps=25[s{i}]'
-        )
-        concat_inputs.append(f'[s{i}]')
-    
-    filter_complex = ';'.join(filter_parts) + ';' + ''.join(concat_inputs) + f'concat=n={n}:v=1:a=0[outv]'
-    
-    cmd = ['ffmpeg', '-y'] + inputs + [
-        '-filter_complex', filter_complex,
-        '-map', '[outv]',
-        '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
-        '-pix_fmt', 'yuv420p', '-r', '25', '-t', str(total_duration),
-        output_path
-    ]
-    
-    print(f'Simple slideshow: {len(photo_paths)} photos, {total_duration:.1f}s total')
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-    if r.returncode != 0:
-        # Log full error for debugging
-        full_err = (r.stderr or '')[-800:]
-        print(f'Simple slideshow STDERR: {full_err}')
-        raise RuntimeError('Simple slideshow failed: ' + full_err[:400])
     return output_path
 
 def build_pov_background(photo_paths, output_path, total_duration, width=1080, height=1920):
     if not photo_paths:
         raise ValueError('No photos to build background from')
-    n = len(photo_paths)
-    fps = 25
-    per_photo = total_duration / n
-    frames_per = max(int(per_photo * fps), fps)
-    inputs = []
-    filter_parts = []
-    concat_parts = []
-    for i, photo in enumerate(photo_paths):
-        inputs += ['-loop', '1', '-t', str(per_photo + 1.0), '-i', photo]
-        effect = i % 4
-        if effect == 0:
-            zp = f'zoompan=z=min(zoom+0.0008\,1.3):x=iw/2-(iw/zoom/2):y=ih/2-(ih/zoom/2):d={frames_per}:s={width}x{height}:fps={fps}'
-        elif effect == 1:
-            zp = f'zoompan=z=1.25:x=iw*0.15*(1-on/{frames_per}):y=ih/2-(ih/zoom/2):d={frames_per}:s={width}x{height}:fps={fps}'
-        elif effect == 2:
-            zp = f'zoompan=z=1.25:x=iw*0.15*(on/{frames_per}):y=ih/2-(ih/zoom/2):d={frames_per}:s={width}x{height}:fps={fps}'
-        else:
-            zp = f'zoompan=z=max(zoom-0.0006\,1.0):x=iw/2-(iw/zoom/2):y=ih*0.45-(ih/zoom/2):d={frames_per}:s={width}x{height}:fps={fps}'
-        filt = f'[{i}:v]scale={width*2}:{height*2}:force_original_aspect_ratio=increase,crop={width*2}:{height*2},{zp},setsar=1[v{i}]'
-        filter_parts.append(filt)
-        concat_parts.append(f'[v{i}]')
-    filter_complex = ';'.join(filter_parts) + ';' + ''.join(concat_parts) + f'concat=n={n}:v=1:a=0[outv]'
-    cmd = ['ffmpeg', '-y'] + inputs + ['-filter_complex', filter_complex, '-map', '[outv]',
-           '-c:v', 'libx264', '-preset', 'fast', '-crf', '22',
-           '-pix_fmt', 'yuv420p', '-r', str(fps), '-t', str(total_duration), output_path]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=480)
-    if r.returncode != 0:
-        print(f'Ken Burns failed (stderr tail): {r.stderr[-300:]}')
-        print('Falling back to simple slideshow...')
-        return _simple_slideshow(photo_paths, output_path, total_duration, width, height)
-    return output_path
+    # Use simple slideshow directly (Ken Burns is too slow for Railway)
+    return _simple_slideshow(photo_paths, output_path, total_duration, width, height)
 
 def composite_avatar_on_background(heygen_path, bg_path, output_path, width=1080, height=1920):
     avatar_target_w = int(width * 0.48)
@@ -148,7 +123,7 @@ def add_text_overlays(video_path, output_path, vehicle_name, price, dealer_name)
         raise RuntimeError('Text overlay failed: ' + r.stderr[-500:])
     return output_path
 
-def download_vehicle_photos(photo_urls, tmpdir, max_photos=16):
+def download_vehicle_photos(photo_urls, tmpdir, max_photos=10):
     downloaded = []
     for i, url in enumerate(photo_urls[:max_photos]):
         ext = url.split('.')[-1].split('?')[0].lower() or 'jpg'
@@ -176,7 +151,7 @@ async def assemble_final_video(vehicle, heygen_video_url, output_dir, job_id):
     int_features = vehicle.get('interior_features', [])
     total_features = max(len(ext_features) + len(int_features), 1)
     ext_ratio = len(ext_features) / total_features
-    n_photos = min(len(all_photos), 12)
+    n_photos = min(len(all_photos), 8)
     n_ext_photos = max(int(n_photos * ext_ratio), 2)
     n_int_photos = max(n_photos - n_ext_photos, 2)
     ordered_urls = all_photos[:n_ext_photos] + all_photos[n_ext_photos:n_ext_photos + n_int_photos]
