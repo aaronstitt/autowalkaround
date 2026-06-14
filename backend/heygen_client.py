@@ -108,7 +108,7 @@ def create_multiscene_avatar_video(avatar_id, voice_id, script_data, ext_photo_u
 
     # Set the IUC lot background so Aaron appears ON the actual dealership lot
     if lot_bg_url:
-        payload['background'] = {'url': lot_bg_url}
+        payload['background'] = {'type': 'image', 'url': lot_bg_url}
         print(f'Using lot background: {lot_bg_url[:80]}')
 
     print(f'Creating HeyGen MP4 with lot background...')
