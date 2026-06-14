@@ -108,13 +108,15 @@ def build_composite_walkaround(photo_paths, heygen_path, output_path, vehicle_na
                 + '[bg][av]overlay=' + str(aaron_x) + ':' + str(aaron_y) + ':shortest=1[out]'
             )
         elif has_alpha:
-            # Single-stream VP9 with alpha in same stream
+            # VP9 yuva420p single stream: use alphaextract to properly remove background
+            # split into color and alpha channels, then alphamerge
             fc = (
                 '[0:v]' + text_chain + 'setsar=1[bg];'
                 + '[1:v]scale=' + str(aaron_w) + ':' + str(aaron_h) + ':force_original_aspect_ratio=decrease,pad=' + str(aaron_w) + ':' + str(aaron_h) + ':(ow-iw)/2:(oh-ih)/2[av];'
-                + '[bg][av]overlay=' + str(aaron_x) + ':' + str(aaron_y) + ':shortest=1[out]'
+                + '[av]split[avc][ava];[ava]alphaextract[alpha];[avc][alpha]alphamerge[avfinal];'
+                + '[bg][avfinal]overlay=' + str(aaron_x) + ':' + str(aaron_y) + ':shortest=1[out]'
             )
-        else:
+                else:
             # MP4 without alpha: try chroma key for common studio backgrounds
             fc = (
                 '[0:v]' + text_chain + 'setsar=1[bg];'
