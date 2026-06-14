@@ -45,7 +45,24 @@ export default function Dashboard() {
     if (!vehicleUrl || !selectedSp) return;
     setGenerating(true); setError('');
     try {
-      const job = await video.generate({ vehicle_url: vehicleUrl, salesperson_id: selectedSp });
+      // Fetch the vehicle page HTML from the browser (avoids server-side bot detection)
+      let pageHtml: string | undefined;
+      try {
+        const resp = await fetch(vehicleUrl, {
+          headers: {
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+          }
+        });
+        if (resp.ok) {
+          pageHtml = await resp.text();
+        }
+      } catch(fetchErr) {
+        // If browser fetch fails (CORS etc), backend will try server-side
+        console.warn('Browser fetch of vehicle page failed, backend will retry:', fetchErr);
+      }
+
+      const job = await video.generate({ vehicle_url: vehicleUrl, salesperson_id: selectedSp, page_html: pageHtml });
       setActiveJob(job);
       setVehicleUrl('');
       pollRef.current = setInterval(() => pollJob(job.job_id), 8000);
