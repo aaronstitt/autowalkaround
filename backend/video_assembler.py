@@ -90,7 +90,7 @@ def build_composite_walkaround(photo_paths, heygen_path, output_path, vehicle_na
         if vd:
             text_filters.append("drawtext=text='{}':fontcolor=white:fontsize=18:x=(w-text_w)/2:y=h-50:box=1:boxcolor=black@0.55:boxborderw=4".format(vd))
         text_chain = (','.join(text_filters) + ',') if text_filters else ''
-        scale_str = str(aaron_w) + ':' + str(aaron_h) + ':force_original_aspect_ratio=decrease,pad=' + str(aaron_w) + ':' + str(aaron_h) + ':(ow-iw)/2:(oh-ih)/2'
+        scale_str = str(aaron_w) + ':' + str(aaron_h) + ':force_original_aspect_ratio=decrease'
         ov_str = str(aaron_x) + ':' + str(aaron_y) + ':shortest=1[out]'
         if has_alpha:
             fc = (
