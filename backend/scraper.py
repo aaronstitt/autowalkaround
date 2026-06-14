@@ -37,22 +37,37 @@ EXTERIOR_KEYWORDS = [
 
 def _fetch_with_retry(url: str, max_retries: int = 4, timeout: int = 20) -> requests.Response:
     """Fetch URL with exponential backoff retry on 429/5xx errors."""
+    # Try ScraperAPI if configured (handles bot detection / IP blocking)
+    scraper_api_key = __import__('os').getenv('SCRAPER_API_KEY', '')
+    
     session = requests.Session()
-    session.headers.update(HEADERS)
-    base_url = "/".join(url.split("/")[:3])
-    session.headers["Referer"] = base_url + "/"
-
+    
     for attempt in range(max_retries):
         try:
             if attempt > 0:
                 wait = (2 ** attempt) + random.uniform(1.0, 3.0)
                 time.sleep(wait)
             else:
-                time.sleep(random.uniform(0.5, 1.5))
+                time.sleep(random.uniform(0.3, 1.0))
 
-            resp = session.get(url, timeout=timeout, allow_redirects=True)
+            if scraper_api_key:
+                # Use ScraperAPI proxy to bypass bot detection
+                proxy_url = f'https://api.scraperapi.com?api_key={scraper_api_key}&url={requests.utils.quote(url)}&render=false'
+                resp = session.get(proxy_url, timeout=timeout, allow_redirects=True)
+            else:
+                session.headers.update(HEADERS)
+                base_url = "/".join(url.split("/")[:3])
+                session.headers["Referer"] = base_url + "/"
+                resp = session.get(url, timeout=timeout, allow_redirects=True)
 
-            if resp.status_code == 429:
+            if resp.status_code in (429, 403):
+                if not scraper_api_key:
+                    # If blocked and no proxy, fail fast
+                    raise requests.exceptions.HTTPError(
+                        f'{resp.status_code} Client Error: Bot detection - server blocked the request. '
+                        f'Set SCRAPER_API_KEY env var to enable proxy scraping.',
+                        response=resp
+                    )
                 retry_after = int(resp.headers.get("Retry-After", 5))
                 wait = max(retry_after, 5) + random.uniform(1.0, 3.0)
                 time.sleep(wait)
@@ -74,11 +89,9 @@ def _fetch_with_retry(url: str, max_retries: int = 4, timeout: int = 20) -> requ
     raise requests.exceptions.RetryError(f"Failed to fetch {url} after {max_retries} attempts")
 
 
-def scrape_vehicle_page(url: str) -> dict:
-    resp = _fetch_with_retry(url)
-    soup = BeautifulSoup(resp.text, "html.parser")
-    html = resp.text
-
+def parse_vehicle_html(html: str, url: str) -> dict:
+    """Parse vehicle listing HTML into structured data."""
+    soup = BeautifulSoup(html, "html.parser")
     vehicle = {}
 
     for script in soup.find_all("script", type="application/ld+json"):
@@ -133,10 +146,8 @@ def scrape_vehicle_page(url: str) -> dict:
 
     vehicle["highlighted_features"] = highlighted[:19]
 
-    # Simple reliable photo regex - no single-quote escaping needed since we just avoid quotes and spaces
     photo_pattern = re.compile(r'https://pictures\.dealer\.com/\S+?\.(?:jpg|png|jpeg)', re.I)
     all_photos = list(dict.fromkeys(photo_pattern.findall(html)))
-    # Strip trailing quote characters that might get captured
     cleaned = []
     for p in all_photos:
         p = p.rstrip('"').rstrip("'").rstrip('>')
@@ -174,3 +185,18 @@ def scrape_vehicle_page(url: str) -> dict:
     vehicle["exterior_features"] = exterior_features
 
     return vehicle
+
+
+def scrape_vehicle_page(url: str, page_html: str = None) -> dict:
+    """
+    Scrape vehicle listing page.
+    If page_html is provided (from frontend browser fetch), use it directly.
+    Otherwise, fetch the URL from the server.
+    """
+    if page_html and len(page_html) > 1000:
+        # Use HTML provided by the frontend (avoids bot detection)
+        return parse_vehicle_html(page_html, url)
+    
+    # Fetch from server
+    resp = _fetch_with_retry(url)
+    return parse_vehicle_html(resp.text, url)
