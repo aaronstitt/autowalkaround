@@ -65,7 +65,7 @@ async def run_pipeline(job_id, vehicle_url, salesperson, dealership_id, page_htm
         lb = salesperson.get('lot_background_url') or None
         upd('rendering', 'Generating AI salesperson video (4-8 min)...')
         hid = await loop.run_in_executor(None, lambda: create_multiscene_avatar_video(avatar_id=salesperson['heygen_avatar_id'], voice_id=salesperson['heygen_voice_id'], script_data=script_data, ext_photo_url=ep, int_photo_url=ip, lot_bg_url=lb))
-        hr = await loop.run_in_executor(None, lambda: poll_video_status(hid, timeout_seconds=720))
+        hr = await loop.run_in_executor(None, lambda: poll_video_status(hid, timeout=720))
         upd('assembling', 'Compositing final video with vehicle photos...')
         fp = await assemble_final_video(vehicle=vehicle, heygen_video_url=hr['video_url'], output_dir=OUTPUT_DIR, job_id=job_id)
         upd('uploading', 'Uploading final video...')
