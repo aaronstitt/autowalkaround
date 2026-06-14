@@ -80,6 +80,48 @@ def get_look_id_for_avatar(avatar_group_id):
         print(f'get_look_id fallback error: {e2}')
     return avatar_group_id
 
+def _rehost_background_image(url):
+    '''Download image from any URL and re-upload to Supabase storage so HeyGen can access it.'''
+    try:
+        import hashlib
+        # Already on our Supabase public storage - use as-is
+        if 'supabase.co' in url and '/public/' in url:
+            return url
+        supabase_url = os.getenv('SUPABASE_URL', '')
+        service_key = os.getenv('SUPABASE_SERVICE_KEY', '')
+        if not supabase_url or not service_key:
+            print('No SUPABASE_SERVICE_KEY env var - cannot rehost background')
+            return None
+        # Download the image
+        resp = requests.get(url, timeout=20, headers={'User-Agent': 'Mozilla/5.0'})
+        if resp.status_code != 200:
+            print(f'Background image fetch failed: {resp.status_code}')
+            return None
+        img_data = resp.content
+        url_hash = hashlib.md5(url.encode()).hexdigest()[:12]
+        storage_path = f'backgrounds/lot_bg_{url_hash}.jpg'
+        # Upload to Supabase videos bucket (public)
+        upload_resp = requests.post(
+            f'{supabase_url}/storage/v1/object/videos/{storage_path}',
+            headers={
+                'Authorization': f'Bearer {service_key}',
+                'Content-Type': 'image/jpeg',
+                'x-upsert': 'true'
+            },
+            data=img_data,
+            timeout=30
+        )
+        if upload_resp.status_code in (200, 201, 409):
+            public_url = f'{supabase_url}/storage/v1/object/public/videos/{storage_path}'
+            print(f'Background re-hosted at: {public_url}')
+            return public_url
+        else:
+            print(f'Background rehost upload failed: {upload_resp.status_code}: {upload_resp.text[:100]}')
+            return None
+    except Exception as e:
+        print(f'_rehost_background_image error: {e}')
+        return None
+
 def create_multiscene_avatar_video(avatar_id, voice_id, script_data, ext_photo_url=None, int_photo_url=None, lot_bg_url=None, width=720, height=1280):
     '''Create HeyGen MP4 talking head video with optional lot background image.
     The lot_bg_url sets the background behind Aaron so he appears on the actual
@@ -108,8 +150,11 @@ def create_multiscene_avatar_video(avatar_id, voice_id, script_data, ext_photo_u
 
     # Set the IUC lot background so Aaron appears ON the actual dealership lot
     if lot_bg_url:
-        payload['background'] = {'type': 'image', 'url': lot_bg_url}
-        print(f'Using lot background: {lot_bg_url[:80]}')
+        # Re-host image so HeyGen servers can access it
+        hosted_url = _rehost_background_image(lot_bg_url)
+        if hosted_url:
+            payload['background'] = {'type': 'image', 'url': hosted_url}
+            print(f'Using lot background: {hosted_url[:80]}')
 
     print(f'Creating HeyGen MP4 with lot background...')
     resp = requests.post(f'{HEYGEN_BASE}/v3/videos', headers=get_headers(), json=payload)
