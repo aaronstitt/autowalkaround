@@ -31,16 +31,7 @@ def run_ffmpeg(cmd, label='ffmpeg', timeout=300):
         raise RuntimeError('{} failed rc={}: {}'.format(label, r.returncode, r.stderr[-500:]))
     return r
 
-def prescale_photo(src, dest, w=720, h=1280):
-    cmd = ['ffmpeg', '-y', '-i', src,
-           '-vf', 'scale={}:{}:force_original_aspect_ratio=increase,crop={}:{}'.format(w, h, w, h),
-           '-q:v', '2', '-frames:v', '1', dest]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-    return r.returncode == 0 and os.path.exists(dest)
-
 def make_photo_clip(photo_path, duration, output_path, w=720, h=1280):
-    """Turn a single still photo into a video clip with subtle Ken Burns zoom for motion."""
-    # Ken Burns: slow zoom from 1.0x to 1.08x over the clip duration
     zoom_expr = 'min(1.08,zoom+0.0007)'
     vf = (
         "scale={}:{}:force_original_aspect_ratio=increase,"
@@ -58,7 +49,6 @@ def make_photo_clip(photo_path, duration, output_path, w=720, h=1280):
            output_path]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     if r.returncode != 0:
-        # Fallback: simple static clip without zoompan (less memory)
         cmd2 = ['ffmpeg', '-y', '-loop', '1', '-i', photo_path,
                 '-vf', 'scale={}:{}:force_original_aspect_ratio=increase,crop={}:{},setsar=1'.format(w,h,w,h),
                 '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28',
@@ -74,7 +64,6 @@ def make_photo_clip(photo_path, duration, output_path, w=720, h=1280):
     return output_path
 
 def trim_video_segment(src, start, duration, output_path, w=720, h=1280):
-    """Trim a video to a segment and scale to target resolution."""
     cmd = ['ffmpeg', '-y', '-ss', str(start), '-i', src, '-t', str(duration),
            '-vf', 'scale={}:{}:force_original_aspect_ratio=increase,crop={}:{},setsar=1'.format(w,h,w,h),
            '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28',
@@ -88,7 +77,6 @@ def trim_video_segment(src, start, duration, output_path, w=720, h=1280):
     return output_path
 
 def add_audio_to_video(video_path, audio_src, start_offset, duration, output_path):
-    """Overlay audio from audio_src starting at start_offset for duration onto video_path."""
     cmd = ['ffmpeg', '-y',
            '-i', video_path,
            '-ss', str(start_offset), '-t', str(duration), '-i', audio_src,
@@ -101,26 +89,7 @@ def add_audio_to_video(video_path, audio_src, start_offset, duration, output_pat
         raise RuntimeError('add_audio failed: ' + r.stderr[-300:])
     return output_path
 
-def add_text_overlay(video_path, text, output_path, y_pos=60, fontsize=24, color='white', box=True):
-    """Add a single text overlay to a video clip."""
-    text_safe = text.replace("'", "").replace(":", "-").replace('"', '')[:50]
-    box_str = ':box=1:boxcolor=black@0.6:boxborderw=8' if box else ''
-    vf = "drawtext=text='{}':fontcolor={}:fontsize={}:x=(w-text_w)/2:y={}{}".format(
-        text_safe, color, fontsize, y_pos, box_str)
-    cmd = ['ffmpeg', '-y', '-i', video_path,
-           '-vf', vf,
-           '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '26',
-           '-pix_fmt', 'yuv420p',
-           '-c:a', 'copy',
-           '-threads', '1',
-           output_path]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-    if r.returncode != 0:
-        raise RuntimeError('text_overlay failed: ' + r.stderr[-300:])
-    return output_path
-
 def concat_clips(clip_paths, output_path):
-    """Concatenate multiple video clips (all must be same codec/res) using concat demuxer."""
     with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
         listf = f.name
         for p in clip_paths:
@@ -142,7 +111,6 @@ def concat_clips(clip_paths, output_path):
     return output_path
 
 def add_silent_audio(video_path, output_path):
-    """Add silent audio track to a video that has no audio."""
     cmd = ['ffmpeg', '-y', '-i', video_path,
            '-f', 'lavfi', '-i', 'aevalsrc=0:c=mono:s=44100',
            '-c:v', 'copy',
@@ -164,54 +132,48 @@ def has_audio_stream(path):
         return False
 
 def build_walkaround_video(heygen_path, photo_paths, vehicle_video_path,
-                            vehicle_name, price, dealer_name, output_path):
-    """
-    Build a real walkaround-style video:
-    - Intro: Aaron full-screen (first ~8s of HeyGen video)
-    - Exterior section: vehicle exterior photos with Ken Burns motion, Aaron voiceover
-    - Vehicle video clip (if available): 6-10s of actual footage
-    - Interior section: vehicle interior photos with Ken Burns motion, Aaron voiceover
-    - Outro: Aaron full-screen (last ~8s of HeyGen video)
-    All 720x1280 9:16
-    """
+                           vehicle_name, price, dealer_name, output_path):
     total_duration = get_video_duration(heygen_path)
     print('HeyGen total duration: {}s'.format(round(total_duration, 1)))
     print('Photos available: {}'.format(len(photo_paths)))
     print('Vehicle video: {}'.format(vehicle_video_path or 'none'))
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        # ── 1. Split photos into exterior and interior groups ──────────────────
+        # Split photos: first 65% exterior, last 35% interior
         n = len(photo_paths)
-        # First 60% = exterior angles, last 40% = interior shots
-        split_idx = max(1, int(n * 0.6))
+        split_idx = max(1, int(n * 0.65))
         ext_photos = photo_paths[:split_idx]
         int_photos = photo_paths[split_idx:]
         if not int_photos:
             int_photos = photo_paths[-2:]
 
-        # ── 2. Calculate segment durations ────────────────────────────────────
-        # Aaron: 8s intro + 8s outro, rest is photo/video section
+        # Segment durations
         intro_dur = min(8.0, total_duration * 0.15)
         outro_dur = min(8.0, total_duration * 0.15)
         middle_dur = total_duration - intro_dur - outro_dur
 
-        # Vehicle video gets up to 8 seconds in the middle if available
         vvid_dur = 0.0
         if vehicle_video_path and os.path.exists(vehicle_video_path):
             raw_vv_dur = get_video_duration(vehicle_video_path)
             vvid_dur = min(8.0, raw_vv_dur)
 
-        ext_photo_dur = middle_dur * 0.5
-        int_photo_dur = middle_dur * 0.5 - vvid_dur
-
-        # Each photo shows for 3-5 seconds minimum
-        n_ext = min(len(ext_photos), max(1, int(ext_photo_dur / 4.0)))
-        n_int = min(len(int_photos), max(1, int(int_photo_dur / 4.0)))
+        # Use up to 10 exterior + 6 interior photos
+        n_ext = min(len(ext_photos), 10)
+        n_int = min(len(int_photos), 6)
         n_ext = max(n_ext, 1)
         n_int = max(n_int, 1)
 
-        per_ext = ext_photo_dur / n_ext
-        per_int = int_photo_dur / max(n_int, 1)
+        # Calculate per-photo durations
+        photos_time = middle_dur - vvid_dur
+        per_ext = max(3.0, (photos_time * 0.6) / n_ext)
+        per_int = max(3.0, (photos_time * 0.4) / n_int)
+
+        # Ensure we don't exceed available audio
+        used = intro_dur + n_ext * per_ext + vvid_dur + n_int * per_int + outro_dur
+        if used > total_duration * 1.02:
+            available = total_duration - intro_dur - outro_dur - vvid_dur
+            per_ext = max(3.0, (available * 0.6) / n_ext)
+            per_int = max(3.0, (available * 0.4) / n_int)
 
         print('Intro={}s, ExtPhotos={}x{}s, VehicleVid={}s, IntPhotos={}x{}s, Outro={}s'.format(
             round(intro_dur,1), n_ext, round(per_ext,1), round(vvid_dur,1),
@@ -220,45 +182,39 @@ def build_walkaround_video(heygen_path, photo_paths, vehicle_video_path,
         clip_paths = []
         audio_offset = 0.0
 
-        # ── 3. INTRO CLIP: Aaron full-screen ──────────────────────────────────
+        # INTRO: Aaron full-screen with vehicle name + price
         intro_path = os.path.join(tmpdir, 'intro.mp4')
         trim_video_segment(heygen_path, 0, intro_dur, intro_path)
-        # Add name/price text
         intro_txt_path = os.path.join(tmpdir, 'intro_txt.mp4')
-        safe_name = (vehicle_name or '')[:45].replace("'","").replace(":"," -")
+        safe_name = (vehicle_name or '')[:45].replace("'","").replace(":",' -')
         safe_price = str(price or '').replace('$','').replace(',','')
         safe_dealer = (dealer_name or 'Immaculate Used Cars')[:40].replace("'","")
         vf_intro = "drawtext=text='{}':fontcolor=white:fontsize=26:x=(w-text_w)/2:y=55:box=1:boxcolor=black@0.65:boxborderw=7,drawtext=text='{}':fontcolor=#FFD700:fontsize=32:x=(w-text_w)/2:y=95:box=1:boxcolor=black@0.65:boxborderw=7".format(safe_name, '$'+safe_price if safe_price else '')
         cmd_intro = ['ffmpeg', '-y', '-i', intro_path,
                      '-vf', vf_intro,
                      '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '26',
-                     '-pix_fmt', 'yuv420p',
-                     '-c:a', 'copy',
-                     '-threads', '1',
+                     '-pix_fmt', 'yuv420p', '-c:a', 'copy', '-threads', '1',
                      intro_txt_path]
         r = subprocess.run(cmd_intro, capture_output=True, text=True, timeout=60)
         clip_paths.append(intro_txt_path if r.returncode == 0 else intro_path)
         audio_offset += intro_dur
 
-        # ── 4. EXTERIOR PHOTO CLIPS ───────────────────────────────────────────
-        ext_audio_start = audio_offset
+        # EXTERIOR PHOTO CLIPS with Aaron voiceover
         for i, ph in enumerate(ext_photos[:n_ext]):
             clip_path = os.path.join(tmpdir, 'ext_{:02d}_raw.mp4'.format(i))
             clip_with_audio = os.path.join(tmpdir, 'ext_{:02d}.mp4'.format(i))
             make_photo_clip(ph, per_ext, clip_path)
-            # Lay in Aaron's audio over this photo clip
             try:
                 add_audio_to_video(clip_path, heygen_path, audio_offset, per_ext, clip_with_audio)
                 clip_paths.append(clip_with_audio)
             except Exception as e:
                 print('Ext audio overlay failed for clip {}: {}'.format(i, e))
-                # Just use silent photo clip
                 silent_path = os.path.join(tmpdir, 'ext_{:02d}_silent.mp4'.format(i))
                 add_silent_audio(clip_path, silent_path)
                 clip_paths.append(silent_path)
             audio_offset += per_ext
 
-        # ── 5. VEHICLE VIDEO CLIP (if available) ──────────────────────────────
+        # VEHICLE VIDEO CLIP
         if vvid_dur > 1.0:
             vvid_path = os.path.join(tmpdir, 'vehicle_vid.mp4')
             vvid_with_audio = os.path.join(tmpdir, 'vehicle_vid_audio.mp4')
@@ -270,7 +226,7 @@ def build_walkaround_video(heygen_path, photo_paths, vehicle_video_path,
             except Exception as e:
                 print('Vehicle video clip failed: {}'.format(e))
 
-        # ── 6. INTERIOR PHOTO CLIPS ───────────────────────────────────────────
+        # INTERIOR PHOTO CLIPS with Aaron voiceover
         for i, ph in enumerate(int_photos[:n_int]):
             clip_path = os.path.join(tmpdir, 'int_{:02d}_raw.mp4'.format(i))
             clip_with_audio = os.path.join(tmpdir, 'int_{:02d}.mp4'.format(i))
@@ -285,26 +241,22 @@ def build_walkaround_video(heygen_path, photo_paths, vehicle_video_path,
                 clip_paths.append(silent_path)
             audio_offset += per_int
 
-        # ── 7. OUTRO CLIP: Aaron full-screen ──────────────────────────────────
+        # OUTRO: Aaron full-screen with dealer name
         outro_start = total_duration - outro_dur
         outro_path = os.path.join(tmpdir, 'outro.mp4')
         try:
             trim_video_segment(heygen_path, outro_start, outro_dur, outro_path)
-            # Add dealer CTA text
             outro_txt_path = os.path.join(tmpdir, 'outro_txt.mp4')
             vf_outro = "drawtext=text='{}':fontcolor=white:fontsize=22:x=(w-text_w)/2:y=h-70:box=1:boxcolor=black@0.6:boxborderw=6".format(safe_dealer)
             cmd_outro = ['ffmpeg', '-y', '-i', outro_path,
                          '-vf', vf_outro,
                          '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '26',
-                         '-pix_fmt', 'yuv420p',
-                         '-c:a', 'copy',
-                         '-threads', '1',
+                         '-pix_fmt', 'yuv420p', '-c:a', 'copy', '-threads', '1',
                          outro_txt_path]
             r2 = subprocess.run(cmd_outro, capture_output=True, text=True, timeout=60)
             clip_paths.append(outro_txt_path if r2.returncode == 0 else outro_path)
         except Exception as e:
             print('Outro trim failed: {}'.format(e))
-            # Use last bit of heygen as fallback
             clip_paths.append(intro_path)
 
         print('Concatenating {} clips...'.format(len(clip_paths)))
@@ -312,7 +264,6 @@ def build_walkaround_video(heygen_path, photo_paths, vehicle_video_path,
         print('Walkaround video complete: {}'.format(output_path))
 
     return output_path
-
 
 async def assemble_final_video(vehicle, heygen_video_url, output_dir, job_id):
     os.makedirs(output_dir, exist_ok=True)
@@ -324,7 +275,6 @@ async def assemble_final_video(vehicle, heygen_video_url, output_dir, job_id):
     if not download_file(heygen_video_url, heygen_path):
         raise RuntimeError('Failed to download HeyGen video')
 
-    # Detect actual format and rename if needed
     probe_cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', heygen_path]
     probe_r = subprocess.run(probe_cmd, capture_output=True, text=True)
     try:
@@ -340,7 +290,6 @@ async def assemble_final_video(vehicle, heygen_video_url, output_dir, job_id):
     except Exception:
         pass
 
-    # ── Download vehicle photos (up to 45, spread across set) ─────────────────
     photos = vehicle.get('photos', [])
     if not photos:
         raise RuntimeError('No vehicle photos available')
@@ -361,7 +310,6 @@ async def assemble_final_video(vehicle, heygen_video_url, output_dir, job_id):
         raise RuntimeError('All vehicle photos failed to download')
     print('Downloaded {} vehicle photos'.format(len(photo_paths)))
 
-    # ── Download vehicle video (if available) ──────────────────────────────────
     vehicle_video_path = None
     video_url = vehicle.get('video_url')
     if video_url:
@@ -372,7 +320,6 @@ async def assemble_final_video(vehicle, heygen_video_url, output_dir, job_id):
         else:
             print('Vehicle video download failed, skipping')
 
-    # ── Build walkaround video ─────────────────────────────────────────────────
     vehicle_name = vehicle.get('year_make_model', vehicle.get('name', ''))
     price = str(vehicle.get('price', '')).replace('$', '').replace(',', '')
     dealer_name = vehicle.get('dealer_name', 'Immaculate Used Cars')
@@ -387,21 +334,14 @@ async def assemble_final_video(vehicle, heygen_video_url, output_dir, job_id):
         output_path=final_path
     )
 
-    # Cleanup
     for p in photo_paths:
-        try:
-            os.remove(p)
-        except Exception:
-            pass
-    try:
-        os.remove(heygen_path)
-    except Exception:
-        pass
+        try: os.remove(p)
+        except Exception: pass
+    try: os.remove(heygen_path)
+    except Exception: pass
     if vehicle_video_path:
-        try:
-            os.remove(vehicle_video_path)
-        except Exception:
-            pass
+        try: os.remove(vehicle_video_path)
+        except Exception: pass
 
     print('Final walkaround video: {}'.format(final_path))
     return final_path
