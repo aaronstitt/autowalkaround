@@ -215,10 +215,11 @@ def build_walkaround_video(heygen_path, photo_paths, vehicle_video_path,
     print('Vehicle video: {}'.format(vehicle_video_path or 'none'))
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        # ── Use MP4 directly for colorkey compositing ────────────────────────
-        webm_path = heygen_path  # Use MP4 directly - we apply colorkey in FFmpeg
-        webm_ok = True  # Always composite (colorkey removes grey background)
-        print('Using colorkey compositing - Aaron MP4 keyed onto vehicle photos')
+        # ── Use MP4 directly for vstack walkaround compositing ───────────────
+        webm_path = heygen_path  # heygen_path is the MP4 (or WebM) from HeyGen
+        mp4_path = heygen_path   # Keep reference to original for intro/outro
+        webm_ok = True           # Always use vstack compositing
+        print('Using vstack walkaround: car top 60%, Aaron bottom 40%')
 
         # ── Split photos into exterior and interior ────────────────────────────
         n = len(photo_paths)
