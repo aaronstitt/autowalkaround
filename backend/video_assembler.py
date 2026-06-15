@@ -88,35 +88,33 @@ def extract_webm_segment(webm_path, start, duration, output_path):
 def composite_aaron_on_bg(bg_video, aaron_webm, aaron_start, duration,
                           audio_src, audio_start, output_path, w=720, h=1280):
     """
-    Composite transparent Aaron WebM over a background video.
-    Aaron is positioned in the bottom-left, scaled to ~45% of frame height,
-    so the car is visible above and beside him - true walkaround look.
-    Audio comes from aaron_webm (already has audio) sliced at aaron_start.
+    Composite Aaron MP4 segment over a vehicle photo background.
+    Aaron is cropped to just himself (center 60% horizontally, full height),
+    scaled to ~45% frame height, positioned bottom-center.
+    Uses colorkey to remove his grey lot background.
     """
-    # Aaron height ~45% of frame = ~576px, maintain aspect
-    aaron_h = int(h * 0.45)   # ~576
-    # Aaron is positioned bottom-left: x=20, y=h-aaron_h-20
-    aaron_x = 20
-    aaron_y = h - aaron_h - 20
+    aaron_h = int(h * 0.44)
+    aaron_x = '(W-w)/2'   # center horizontally
+    aaron_y = str(h - aaron_h - 10)  # bottom with small margin
 
-    # Extract just the WebM segment needed
-    seg_webm = output_path + '_seg.webm'
-    extract_webm_segment(aaron_webm, aaron_start, duration, seg_webm)
+    # aaron_webm is actually the MP4 here (passed in build_walkaround_video)
+    mp4_src = audio_src  # the heygen MP4
 
-    # Extract audio segment from the full HeyGen MP4 (if available) or WebM
-    # We overlay audio_src from audio_start
-    # Composite: bg_video + aaron_webm (transparent) + audio
-    filter_complex = (
-        "[0:v]setsar=1[bg];",
-        "[1:v]scale=-1:{}[aaron_scaled];",
-        "[bg][aaron_scaled]overlay={}:{}:shortest=1[out]"
-    )
-    filter_str = ''.join(filter_complex).format(aaron_h, aaron_x, aaron_y)
+    # Colorkey: Aaron's lot background is light grey/sky - use colorkey on grey tones
+    # colorkey=color:similarity:blend - similarity 0.3-0.4 removes grey sky
+    # Then overlay Aaron at bottom-center of vehicle photo background
+    filter_str = (
+        '[0:v]setsar=1[bg];'
+        '[1:v]scale=-1:{ah},'
+        'colorkey=0x8a9db5:0.35:0.1[aaron_keyed];'
+        '[bg][aaron_keyed]overlay={ax}:{ay}:shortest=1[out]'
+    ).format(ah=aaron_h, ax=aaron_x, ay=aaron_y)
 
+    # Extract Aaron segment from MP4
     cmd = ['ffmpeg', '-y',
            '-i', bg_video,
-           '-i', seg_webm,
-           '-ss', str(audio_start), '-t', str(duration), '-i', audio_src,
+           '-ss', str(aaron_start), '-t', str(duration), '-i', mp4_src,
+           '-ss', str(audio_start), '-t', str(duration), '-i', mp4_src,
            '-filter_complex', filter_str,
            '-map', '[out]',
            '-map', '2:a',
@@ -129,9 +127,6 @@ def composite_aaron_on_bg(bg_video, aaron_webm, aaron_start, duration,
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
     if r.returncode != 0:
         raise RuntimeError('composite failed: ' + r.stderr[-400:])
-    # Cleanup segment
-    try: os.remove(seg_webm)
-    except Exception: pass
     return output_path
 
 def trim_video_segment(src, start, duration, output_path, w=720, h=1280):
@@ -199,22 +194,7 @@ def add_text_to_clip(video_path, line1, line2, output_path, position='top'):
     return output_path
 
 def convert_heygen_to_webm(mp4_path, webm_path):
-    """Convert a HeyGen MP4 to transparent WebM using chroma key or direct export."""
-    # Try direct VP9 encode preserving any alpha (some HeyGen outputs have alpha)
-    cmd = ['ffmpeg', '-y', '-i', mp4_path,
-           '-c:v', 'libvpx-vp9', '-b:v', '1500k',
-           '-pix_fmt', 'yuva420p',
-           '-auto-alt-ref', '0',
-           '-r', '24',
-           '-threads', '1',
-           '-an',
-           webm_path]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-    if r.returncode == 0:
-        return webm_path
-    # Fallback: chroma key the lot background (greenish/grey tones behind Aaron)
-    # Use a loose chroma key on grey sky/lot area - not perfect but workable
-    # Actually: we'll use the MP4 directly with a split-screen approach if WebM fails
+    """Not needed - we composite directly from MP4 using colorkey."""
     return None
 
 def build_walkaround_video(heygen_path, photo_paths, vehicle_video_path,
@@ -236,19 +216,10 @@ def build_walkaround_video(heygen_path, photo_paths, vehicle_video_path,
     print('Vehicle video: {}'.format(vehicle_video_path or 'none'))
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        # ── Convert MP4 to transparent WebM for compositing ───────────────────
-        webm_path = os.path.join(tmpdir, 'aaron_transparent.webm')
-        webm_ok = False
-        # Check if the input is already WebM
-        if heygen_path.endswith('.webm'):
-            webm_path = heygen_path
-            webm_ok = True
-        else:
-            print('Converting HeyGen MP4 to transparent WebM...')
-            result = convert_heygen_to_webm(heygen_path, webm_path)
-            webm_ok = result is not None and os.path.exists(webm_path) and os.path.getsize(webm_path) > 100000
-            if not webm_ok:
-                print('WebM conversion failed - falling back to split-screen mode')
+        # ── Use MP4 directly for colorkey compositing ────────────────────────
+        webm_path = heygen_path  # Use MP4 directly - we apply colorkey in FFmpeg
+        webm_ok = True  # Always composite (colorkey removes grey background)
+        print('Using colorkey compositing - Aaron MP4 keyed onto vehicle photos')
 
         # ── Split photos into exterior and interior ────────────────────────────
         n = len(photo_paths)
