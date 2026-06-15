@@ -34,14 +34,13 @@ EXTERIOR_KEYWORDS = [
     "auto high-beam", "heated door mirror", "power liftgate", "exterior", "paint"
 ]
 
-
 def _fetch_with_retry(url: str, max_retries: int = 4, timeout: int = 20) -> requests.Response:
     """Fetch URL with exponential backoff retry on 429/5xx errors."""
     # Try ScraperAPI if configured (handles bot detection / IP blocking)
     scraper_api_key = __import__('os').getenv('SCRAPER_API_KEY', '')
-    
+
     session = requests.Session()
-    
+
     for attempt in range(max_retries):
         try:
             if attempt > 0:
@@ -62,7 +61,6 @@ def _fetch_with_retry(url: str, max_retries: int = 4, timeout: int = 20) -> requ
 
             if resp.status_code in (429, 403):
                 if not scraper_api_key:
-                    # If blocked and no proxy, fail fast
                     raise requests.exceptions.HTTPError(
                         f'{resp.status_code} Client Error: Bot detection - server blocked the request. '
                         f'Set SCRAPER_API_KEY env var to enable proxy scraping.',
@@ -87,7 +85,6 @@ def _fetch_with_retry(url: str, max_retries: int = 4, timeout: int = 20) -> requ
             continue
 
     raise requests.exceptions.RetryError(f"Failed to fetch {url} after {max_retries} attempts")
-
 
 def parse_vehicle_html(html: str, url: str) -> dict:
     """Parse vehicle listing HTML into structured data."""
@@ -146,14 +143,18 @@ def parse_vehicle_html(html: str, url: str) -> dict:
 
     vehicle["highlighted_features"] = highlighted[:19]
 
-    photo_pattern = re.compile(r'https://pictures\.dealer\.com/\S+?\.(?:jpg|png|jpeg)', re.I)
+    # Only grab JPG vehicle photos from dealer.com - filter out PNG files which are
+    # 360-viewer UI elements (Carketa spinner graphics, not actual car photos)
+    photo_pattern = re.compile(r'https://pictures\.dealer\.com/\S+?\.jpg', re.I)
     all_photos = list(dict.fromkeys(photo_pattern.findall(html)))
     cleaned = []
     for p in all_photos:
         p = p.rstrip('"').rstrip("'").rstrip('>')
+        # Skip thumbnails and non-vehicle UI assets
         if 'thumb_' not in p:
             cleaned.append(p)
     vehicle["photos"] = cleaned
+    print(f'Scraper found {len(cleaned)} vehicle photos (JPG only, no 360-viewer PNGs)')
 
     video_xml_match = re.search(r'https://videos\d*\.dealer\.com/clients/\S+?\.xml', html)
     if video_xml_match:
@@ -186,7 +187,6 @@ def parse_vehicle_html(html: str, url: str) -> dict:
 
     return vehicle
 
-
 def scrape_vehicle_page(url: str, page_html: str = None) -> dict:
     """
     Scrape vehicle listing page.
@@ -196,7 +196,7 @@ def scrape_vehicle_page(url: str, page_html: str = None) -> dict:
     if page_html and len(page_html) > 1000:
         # Use HTML provided by the frontend (avoids bot detection)
         return parse_vehicle_html(page_html, url)
-    
+
     # Fetch from server
     resp = _fetch_with_retry(url)
     return parse_vehicle_html(resp.text, url)
