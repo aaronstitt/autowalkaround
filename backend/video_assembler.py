@@ -88,29 +88,28 @@ def extract_webm_segment(webm_path, start, duration, output_path):
 def composite_aaron_on_bg(bg_video, aaron_webm, aaron_start, duration,
                           audio_src, audio_start, output_path, w=720, h=1280):
     """
-    Composite Aaron MP4 segment over a vehicle photo background.
-    Aaron is cropped to just himself (center 60% horizontally, full height),
-    scaled to ~45% frame height, positioned bottom-center.
-    Uses colorkey to remove his grey lot background.
+    Create a stacked walkaround frame:
+    - TOP ~60%: Vehicle photo (zoomed in with Ken Burns)
+    - BOTTOM ~40%: Aaron talking (cropped center portrait from HeyGen video)
+    
+    This creates the walkaround look: Aaron talking in the lower third,
+    vehicle prominently displayed above him - both in the same 9:16 frame.
+    The vehicle photo changes as Aaron 'moves around' the car.
     """
-    aaron_h = int(h * 0.44)
-    aaron_x = '(W-w)/2'   # center horizontally
-    aaron_y = str(h - aaron_h - 10)  # bottom with small margin
+    car_h = int(h * 0.60)    # 768px for car
+    aaron_seg_h = h - car_h  # 512px for Aaron
+    mp4_src = audio_src      # heygen MP4
 
-    # aaron_webm is actually the MP4 here (passed in build_walkaround_video)
-    mp4_src = audio_src  # the heygen MP4
-
-    # Colorkey: Aaron's lot background is light grey/sky - use colorkey on grey tones
-    # colorkey=color:similarity:blend - similarity 0.3-0.4 removes grey sky
-    # Then overlay Aaron at bottom-center of vehicle photo background
+    # Stack: car photo on top | Aaron portrait on bottom
+    # Aaron: crop center portrait from MP4 (his head/torso fills 512px height)
     filter_str = (
-        '[0:v]setsar=1[bg];'
-        '[1:v]scale=-1:{ah},'
-        'colorkey=0x8a9db5:0.35:0.1[aaron_keyed];'
-        '[bg][aaron_keyed]overlay={ax}:{ay}:shortest=1[out]'
-    ).format(ah=aaron_h, ax=aaron_x, ay=aaron_y)
+        '[0:v]scale={w}:{car_h}:force_original_aspect_ratio=increase,'
+        'crop={w}:{car_h},setsar=1[car];'
+        '[1:v]scale={w}:{aaron_h}:force_original_aspect_ratio=increase,'
+        'crop={w}:{aaron_h},setsar=1[aaron];'
+        '[car][aaron]vstack=inputs=2[out]'
+    ).format(w=w, car_h=car_h, aaron_h=aaron_seg_h)
 
-    # Extract Aaron segment from MP4
     cmd = ['ffmpeg', '-y',
            '-i', bg_video,
            '-ss', str(aaron_start), '-t', str(duration), '-i', mp4_src,
