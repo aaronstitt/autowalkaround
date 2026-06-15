@@ -14,3 +14,7 @@ moviepy==1.0.3
 imageio==2.34.1
 imageio-ffmpeg==0.5.1
 lxml==5.2.2
+rembg==2.0.56
+onnxruntime==1.18.1
+numpy==1.26.4
+opencv-python-headless==4.9.0.80
