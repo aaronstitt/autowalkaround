@@ -84,7 +84,6 @@ def _rehost_background_image(url):
     '''Download image from any URL and re-upload to Supabase storage so HeyGen can access it.'''
     try:
         import hashlib
-        # Already on our Supabase public storage - use as-is
         if 'supabase.co' in url and '/public/' in url:
             return url
         supabase_url = os.getenv('SUPABASE_URL', '')
@@ -92,7 +91,6 @@ def _rehost_background_image(url):
         if not supabase_url or not service_key:
             print('No SUPABASE_SERVICE_KEY env var - cannot rehost background')
             return None
-        # Download the image
         resp = requests.get(url, timeout=20, headers={'User-Agent': 'Mozilla/5.0'})
         if resp.status_code != 200:
             print(f'Background image fetch failed: {resp.status_code}')
@@ -100,7 +98,6 @@ def _rehost_background_image(url):
         img_data = resp.content
         url_hash = hashlib.md5(url.encode()).hexdigest()[:12]
         storage_path = f'backgrounds/lot_bg_{url_hash}.jpg'
-        # Upload to Supabase videos bucket (public)
         upload_resp = requests.post(
             f'{supabase_url}/storage/v1/object/videos/{storage_path}',
             headers={
@@ -123,9 +120,10 @@ def _rehost_background_image(url):
         return None
 
 def create_multiscene_avatar_video(avatar_id, voice_id, script_data, ext_photo_url=None, int_photo_url=None, lot_bg_url=None, width=720, height=1280):
-    '''Create HeyGen MP4 talking head video with optional lot background image.
-    The lot_bg_url sets the background behind Aaron so he appears on the actual
-    dealership lot instead of a generic studio background.
+    '''
+    Create HeyGen transparent WebM video of Aaron talking.
+    output_format=webm gives us a transparent (alpha channel) video so we can
+    composite Aaron directly onto vehicle photo backgrounds in FFmpeg.
     '''
     exterior_script = script_data.get('exterior_script', '')
     interior_script = script_data.get('interior_script', '')
@@ -137,7 +135,8 @@ def create_multiscene_avatar_video(avatar_id, voice_id, script_data, ext_photo_u
     if exterior_script and interior_script:
         script_to_use = exterior_script + ' ' + interior_script
 
-    # Build payload with lot background if provided
+    # Use WebM output for transparent alpha channel compositing
+    # This lets us overlay Aaron on vehicle photos in FFmpeg
     payload = {
         'type': 'avatar',
         'avatar_id': look_id,
@@ -145,27 +144,19 @@ def create_multiscene_avatar_video(avatar_id, voice_id, script_data, ext_photo_u
         'voice_id': voice_id,
         'resolution': '720p',
         'aspect_ratio': '9:16',
-        'output_format': 'mp4',
+        'output_format': 'webm',
     }
 
-    # Set the IUC lot background so Aaron appears ON the actual dealership lot
-    if lot_bg_url:
-        # Re-host image so HeyGen servers can access it
-        hosted_url = _rehost_background_image(lot_bg_url)
-        if hosted_url:
-            payload['background'] = {'type': 'image', 'url': hosted_url}
-            print(f'Using lot background: {hosted_url[:80]}')
-
-    print(f'Creating HeyGen MP4 with lot background...')
+    print('Creating HeyGen WebM (transparent) for compositing onto vehicle photos...')
     resp = requests.post(f'{HEYGEN_BASE}/v3/videos', headers=get_headers(), json=payload)
     print(f'HeyGen V3 create response {resp.status_code}: {resp.text[:500]}')
 
     if resp.status_code != 200:
-        # Fallback: try without background if it failed
-        print('Retrying without background...')
-        payload.pop('background', None)
+        # Fallback to MP4 if WebM fails
+        print('WebM failed, retrying with MP4...')
+        payload['output_format'] = 'mp4'
         resp = requests.post(f'{HEYGEN_BASE}/v3/videos', headers=get_headers(), json=payload)
-        print(f'HeyGen fallback response {resp.status_code}: {resp.text[:500]}')
+        print(f'HeyGen MP4 fallback response {resp.status_code}: {resp.text[:500]}')
         if resp.status_code != 200:
             raise RuntimeError(f'HeyGen create failed: {resp.status_code}: {resp.text[:300]}')
 
