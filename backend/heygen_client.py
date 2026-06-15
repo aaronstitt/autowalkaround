@@ -144,21 +144,15 @@ def create_multiscene_avatar_video(avatar_id, voice_id, script_data, ext_photo_u
         'voice_id': voice_id,
         'resolution': '720p',
         'aspect_ratio': '9:16',
-        'output_format': 'webm',
+        'output_format': 'mp4',
     }
 
-    print('Creating HeyGen WebM (transparent) for compositing onto vehicle photos...')
+    print('Creating HeyGen MP4 for vstack walkaround compositing...')
     resp = requests.post(f'{HEYGEN_BASE}/v3/videos', headers=get_headers(), json=payload)
     print(f'HeyGen V3 create response {resp.status_code}: {resp.text[:500]}')
 
     if resp.status_code != 200:
-        # Fallback to MP4 if WebM fails
-        print('WebM failed, retrying with MP4...')
-        payload['output_format'] = 'mp4'
-        resp = requests.post(f'{HEYGEN_BASE}/v3/videos', headers=get_headers(), json=payload)
-        print(f'HeyGen MP4 fallback response {resp.status_code}: {resp.text[:500]}')
-        if resp.status_code != 200:
-            raise RuntimeError(f'HeyGen create failed: {resp.status_code}: {resp.text[:300]}')
+        raise RuntimeError(f'HeyGen create failed: {resp.status_code}: {resp.text[:300]}')
 
     data = resp.json().get('data', {})
     video_id = data.get('video_id')
