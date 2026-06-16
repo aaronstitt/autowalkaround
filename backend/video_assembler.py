@@ -10,6 +10,27 @@ HEYGEN_POLL_INTERVAL = 15
 HEYGEN_POLL_MAX = 300
 
 
+
+def get_look_id(avatar_group_id):
+    import os, requests
+    heygen_base = 'https://api.heygen.com'
+    try:
+        url = heygen_base + '/v3/avatars/looks?ownership=private&group_id=' + avatar_group_id
+        r = requests.get(url, headers={'x-api-key': os.getenv('HEYGEN_API_KEY'), 'Content-Type': 'application/json'}, timeout=30)
+        if r.status_code == 200:
+            data = r.json().get('data', [])
+            looks = data if isinstance(data, list) else data.get('looks', [])
+            preferred_keywords = ['sharp', 'car', 'lot', 'outdoor', 'salesman', 'used']
+            for look in looks:
+                name = (look.get('name') or look.get('look_name') or '').lower()
+                if any(kw in name for kw in preferred_keywords):
+                    return look.get('id') or look.get('look_id')
+            if looks:
+                return looks[0].get('id') or looks[0].get('look_id')
+    except Exception as e:
+        print(f'[get_look_id] error: {e}')
+    return None
+
 def heygen_headers():
     return {'x-api-key': os.getenv('HEYGEN_API_KEY'), 'Content-Type': 'application/json'}
 
