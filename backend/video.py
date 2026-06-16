@@ -21,17 +21,15 @@ PLAN_LIMITS = {'free': 999999, 'starter': 30, 'growth': 90, 'unlimited': 999999}
 HEYGEN_VOICE_ID = os.getenv('HEYGEN_VOICE_ID', '6ee20575cb9f4a7e9dc19096a958eab1')
 HEYGEN_AVATAR_GROUP_ID = os.getenv('HEYGEN_AVATAR_GROUP_ID', '202a882fdd924622bc00d1eca0bf00cd')
 
-
 class GenerateRequest(BaseModel):
     vehicle_url: str
     salesperson_id: str
     page_html: Optional[str] = None
 
-
 @router.post('/generate')
 async def generate_video(req: GenerateRequest, background_tasks: BackgroundTasks,
                          current_user=Depends(get_current_user)):
-    user_id = current_user['id']
+    user_id = current_user['sub']
     resp = supabase.table('users').select('dealership_id').eq('id', user_id).single().execute()
     dealership_id = resp.data.get('dealership_id')
 
@@ -43,13 +41,12 @@ async def generate_video(req: GenerateRequest, background_tasks: BackgroundTasks
         'vehicle_url': req.vehicle_url,
         'salesperson_id': req.salesperson_id,
         'status': 'queued',
-        'progress_message': 'Job queued'
+        'status_message': 'Job queued'
     }).execute()
 
     background_tasks.add_task(_run_pipeline, job_id, req.vehicle_url,
-                              req.salesperson_id, dealership_id, req.page_html)
+                               req.salesperson_id, dealership_id, req.page_html)
     return {'job_id': job_id, 'status': 'queued'}
-
 
 @router.get('/status/{job_id}')
 async def get_status(job_id: str):
@@ -58,21 +55,18 @@ async def get_status(job_id: str):
         raise HTTPException(404, 'Job not found')
     return resp.data
 
-
 @router.get('/history')
 async def get_history(current_user=Depends(get_current_user)):
-    user_id = current_user['id']
+    user_id = current_user['sub']
     resp = supabase.table('video_jobs').select('*').eq('user_id', user_id).order('created_at', desc=True).limit(20).execute()
     return resp.data or []
 
-
 def _upd(job_id, status, msg):
     try:
-        supabase.table('video_jobs').update({'status': status, 'progress_message': msg}).eq('id', job_id).execute()
+        supabase.table('video_jobs').update({'status': status, 'status_message': msg}).eq('id', job_id).execute()
         print(f'[Pipeline] {status}: {msg}')
     except Exception as e:
         print(f'[Pipeline] DB update failed: {e}')
-
 
 async def _run_pipeline(job_id, vehicle_url, salesperson_id, dealership_id, page_html):
     loop = asyncio.get_event_loop()
@@ -100,11 +94,17 @@ async def _run_pipeline(job_id, vehicle_url, salesperson_id, dealership_id, page
         if not vehicle.get('photos') and not vehicle.get('video_url'):
             raise ValueError('No photos or video found on this vehicle listing page.')
 
-        vehicle_name = vehicle.get('name', 'this vehicle')
+        vehicle_name = vehicle.get('name', 'Vehicle')
         photos = vehicle.get('photos', [])
         vehicle_video_url = vehicle.get('video_url')
         print(f'[Pipeline] Vehicle: {vehicle_name}')
         print(f'[Pipeline] Photos: {len(photos)}, Video URL: {vehicle_video_url}')
+
+        # Update vehicle name in DB
+        try:
+            supabase.table('video_jobs').update({'vehicle_name': vehicle_name}).eq('id', job_id).execute()
+        except Exception:
+            pass
 
         # STEP 3: Generate script
         upd('rendering', 'Writing AI walkaround script...')
@@ -147,7 +147,7 @@ async def _run_pipeline(job_id, vehicle_url, salesperson_id, dealership_id, page
         public_url = supabase.storage.from_(SUPABASE_BUCKET).get_public_url(storage_path)
         supabase.table('video_jobs').update({
             'status': 'completed',
-            'progress_message': 'Video ready',
+            'status_message': 'Video ready!',
             'output_url': public_url
         }).eq('id', job_id).execute()
         print(f'[Pipeline] DONE: {public_url}')
