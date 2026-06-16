@@ -12,6 +12,7 @@
     "next": "14.0.0",
     "react": "^18",
     "react-dom": "^18",
+    "@supabase/supabase-js": "^2.39.0",
     "axios": "^1.6.0",
     "lucide-react": "^0.294.0"
   },
