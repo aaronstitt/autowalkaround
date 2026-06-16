@@ -12,6 +12,7 @@ security = HTTPBearer()
 JWT_SECRET = os.getenv('JWT_SECRET', 'change-me-please')
 JWT_ALGORITHM = 'HS256'
 JWT_EXPIRE_HOURS = 24 * 7
+ADMIN_RESET_SECRET = os.getenv('ADMIN_RESET_SECRET', 'aw-admin-2024')
 
 class SignupRequest(BaseModel):
     email: str
@@ -23,6 +24,11 @@ class SignupRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: str
     password: str
+
+class AdminResetRequest(BaseModel):
+    secret: str
+    email: str
+    new_password: str
 
 def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
@@ -63,7 +69,18 @@ async def login(req: LoginRequest):
     if not verify_password(req.password, user['password_hash']):
         raise HTTPException(status_code=401, detail='Invalid credentials')
     token = create_token(user['id'], user['email'], user['dealership_id'])
-    return {'token': token, 'dealership_id': user['dealership_id'], 'user_id': user['id']}
+    return {'access_token': token, 'token': token, 'dealership_id': user['dealership_id'], 'user_id': user['id']}
+
+@router.post('/admin-reset')
+async def admin_reset(req: AdminResetRequest):
+    if req.secret != ADMIN_RESET_SECRET:
+        raise HTTPException(status_code=403, detail='Invalid secret')
+    user_result = supabase.table('users').select('id').eq('email', req.email).execute()
+    if not user_result.data:
+        raise HTTPException(status_code=404, detail='User not found')
+    new_hash = hash_password(req.new_password)
+    supabase.table('users').update({'password_hash': new_hash}).eq('email', req.email).execute()
+    return {'message': 'Password updated successfully'}
 
 @router.get('/me')
 async def get_me(current_user: dict = Depends(get_current_user)):
