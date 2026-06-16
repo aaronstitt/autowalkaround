@@ -1,15 +1,11 @@
-import os, requests, subprocess, json, shutil, tempfile, math, io, time
-import numpy as np
+import os, requests, subprocess, json, shutil, tempfile, time
 from PIL import Image
 
 HEADERS = {'User-Agent': 'Mozilla/5.0'}
 W = 720
 H = 1280
 
-LOT_BG_URL = 'https://lh3.googleusercontent.com/gps-cs-s/APNQkAGSkAI7-TAoNkcv4m5PEQRwYfsJdYgypmHTVDUN1Sx4vxRvC13WEcVTnRSkCNWVATeqv7iDe9xxsWWn2VM9ya1BQJEIvTdrY35roeZ3_Sw61Pzeqju1TI0-SlJv2U-qOrKjDKAa=w1333-h1000-k-no'
-
 HEYGEN_BASE = 'https://api.heygen.com'
-
 HEYGEN_POLL_INTERVAL = 15
 HEYGEN_POLL_MAX = 300
 
@@ -18,33 +14,9 @@ def heygen_headers():
     return {'x-api-key': os.getenv('HEYGEN_API_KEY'), 'Content-Type': 'application/json'}
 
 
-def get_look_id(avatar_group_id):
-    try:
-        url = HEYGEN_BASE + '/v3/avatars/looks?ownership=private&group_id=' + avatar_group_id
-        r = requests.get(url, headers=heygen_headers(), timeout=30)
-        if r.status_code == 200:
-            data = r.json().get('data', [])
-            looks = data if isinstance(data, list) else data.get('looks', [])
-            preferred_keywords = ['sharp', 'car', 'lot', 'outdoor', 'salesman', 'used']
-            for look in looks:
-                name = (look.get('name') or look.get('look_name') or '').lower()
-                if any(kw in name for kw in preferred_keywords):
-                    return look.get('id') or look.get('look_id')
-            if looks:
-                return looks[0].get('id') or looks[0].get('look_id')
-    except Exception as e:
-        print(f'[get_look_id] error: {e}')
-    return None
-
-
-def generate_heygen_webm(script_text, avatar_look_id, voice_id, tmpdir):
-    print('[HeyGen] Generating Avatar V webm with walking motion...')
-
-    motion_prompt = (
-        "The person walks forward and sideways energetically, turning slightly left and right. "
-        "Gestures with both arms extended, points forward and to the sides enthusiastically. "
-        "Moves around dynamically while speaking, like a car salesperson doing a walkaround."
-    )
+def generate_heygen_audio(script_text, avatar_look_id, voice_id, tmpdir):
+    """Generate Aaron's voice-only video via HeyGen Avatar V, extract audio."""
+    print('[HeyGen] Generating voice audio...')
 
     payload = {
         'type': 'avatar',
@@ -52,19 +24,17 @@ def generate_heygen_webm(script_text, avatar_look_id, voice_id, tmpdir):
         'voice_id': voice_id,
         'script': script_text,
         'aspect_ratio': '9:16',
-        'resolution': '1080p',
-        'output_format': 'webm',
-        'motion_prompt': motion_prompt,
+        'resolution': '720p',
+        'output_format': 'mp4',
         'engine': {'type': 'avatar_v'}
     }
 
     r = requests.post(HEYGEN_BASE + '/v3/videos', headers=heygen_headers(), json=payload, timeout=60)
     if r.status_code != 200:
-        print(f'[HeyGen] Create error {r.status_code}: {r.text}')
         raise RuntimeError(f'HeyGen create failed: {r.status_code} {r.text}')
 
     video_id = r.json()['data']['video_id']
-    print(f'[HeyGen] Video ID: {video_id} - polling every {HEYGEN_POLL_INTERVAL}s max {HEYGEN_POLL_MAX} polls...')
+    print(f'[HeyGen] Video ID: {video_id} - polling every {HEYGEN_POLL_INTERVAL}s...')
 
     for i in range(HEYGEN_POLL_MAX):
         time.sleep(HEYGEN_POLL_INTERVAL)
@@ -77,373 +47,232 @@ def generate_heygen_webm(script_text, avatar_look_id, voice_id, tmpdir):
                 video_url = vdata.get('video_url')
                 if not video_url:
                     raise RuntimeError('HeyGen completed but no video_url')
-                webm_path = os.path.join(tmpdir, 'aaron_alpha.webm')
-                _download_file(video_url, webm_path)
-                print(f'[HeyGen] Downloaded webm: {webm_path}')
-                return webm_path
+                heygen_mp4 = os.path.join(tmpdir, 'heygen_voice.mp4')
+                _download_file(video_url, heygen_mp4)
+                print(f'[HeyGen] Downloaded: {heygen_mp4}')
+                # Extract audio only
+                audio_path = os.path.join(tmpdir, 'voice.aac')
+                cmd = ['ffmpeg', '-y', '-i', heygen_mp4, '-vn', '-c:a', 'aac', '-b:a', '192k', audio_path]
+                result = subprocess.run(cmd, capture_output=True)
+                if result.returncode != 0:
+                    raise RuntimeError(f'Audio extract failed: {result.stderr.decode(errors="replace")[-300:]}')
+                print(f'[HeyGen] Audio extracted: {audio_path}')
+                return audio_path, heygen_mp4
             elif status == 'failed':
                 raise RuntimeError(f'HeyGen failed: {vdata.get("failure_message", "unknown")}')
         except RuntimeError:
             raise
         except Exception as e:
-            print(f'[HeyGen] Poll {i+1} error: {e} - continuing...')
+            print(f'[HeyGen] Poll {i+1} error: {e}')
 
-    raise RuntimeError(f'HeyGen timed out after {HEYGEN_POLL_MAX * HEYGEN_POLL_INTERVAL // 60} minutes')
-
-
-def generate_cinematic_clip(look_id, vehicle_photos, vehicle_name, lot_bg_path, duration, tmpdir, clip_index):
-    print(f'[Cinematic] Generating clip {clip_index} ({duration}s)...')
-
-    references = [{'type': 'url', 'url': LOT_BG_URL}]
-    for photo_url in vehicle_photos[:2]:
-        references.append({'type': 'url', 'url': photo_url})
-
-    prompt = (
-        "A professional used car salesman in a blue button-up shirt walks around a "
-        + vehicle_name
-        + " on a used car dealership lot. He moves from the front to the side of the vehicle, "
-        "gesturing toward specific parts of the car. Shot handheld in selfie-style POV, "
-        "as if the salesman is holding the camera while walking. "
-        "The vehicle is prominently visible in the background as he walks around it. "
-        "Bright daylight, natural lighting, used car lot setting."
-    )
-
-    payload = {
-        'type': 'cinematic_avatar',
-        'prompt': prompt,
-        'avatar_id': [look_id],
-        'references': references,
-        'aspect_ratio': '9:16',
-        'resolution': '1080p',
-        'duration': min(int(duration), 15),
-        'enhance_prompt': True
-    }
-
-    r = requests.post(HEYGEN_BASE + '/v3/videos', headers=heygen_headers(), json=payload, timeout=60)
-    if r.status_code != 200:
-        print(f'[Cinematic] Error {r.status_code}: {r.text}')
-        return None
-
-    video_id = r.json()['data']['video_id']
-    print(f'[Cinematic] Clip {clip_index} video_id: {video_id} - polling...')
-
-    for i in range(120):
-        time.sleep(HEYGEN_POLL_INTERVAL)
-        try:
-            sr = requests.get(HEYGEN_BASE + '/v3/videos/' + video_id, headers=heygen_headers(), timeout=30)
-            vdata = sr.json().get('data', {})
-            status = vdata.get('status', 'unknown')
-            print(f'[Cinematic] Clip {clip_index} poll {i+1}: {status}')
-            if status == 'completed':
-                video_url = vdata.get('video_url')
-                clip_path = os.path.join(tmpdir, 'cinematic_' + str(clip_index).zfill(2) + '.mp4')
-                _download_file(video_url, clip_path)
-                print(f'[Cinematic] Clip {clip_index} downloaded')
-                return clip_path
-            elif status == 'failed':
-                print(f'[Cinematic] Clip {clip_index} failed: {vdata.get("failure_message")}')
-                return None
-        except Exception as e:
-            print(f'[Cinematic] Clip {clip_index} poll error: {e}')
-
-    print(f'[Cinematic] Clip {clip_index} timed out')
-    return None
+    raise RuntimeError(f'HeyGen timed out after {HEYGEN_POLL_MAX * HEYGEN_POLL_INTERVAL // 60} min')
 
 
 def _download_file(url, dest_path):
-    r = requests.get(url, headers=HEADERS, stream=True, timeout=120)
+    r = requests.get(url, headers=HEADERS, stream=True, timeout=300)
     r.raise_for_status()
     with open(dest_path, 'wb') as f:
         for chunk in r.iter_content(chunk_size=65536):
             f.write(chunk)
+    print(f'[Download] {dest_path} ({os.path.getsize(dest_path)} bytes)')
 
 
-def _make_solid_bg(color_rgb, duration, output_path):
-    r, g, b = color_rgb
-    color_hex = f'{r:02x}{g:02x}{b:02x}'
-    cmd = [
+def get_vehicle_video_duration(video_path):
+    """Get duration of a video file in seconds."""
+    result = subprocess.run(
+        ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', video_path],
+        capture_output=True
+    )
+    if result.returncode == 0:
+        info = json.loads(result.stdout)
+        dur = float(info.get('format', {}).get('duration', 0))
+        print(f'[Duration] {video_path}: {dur:.1f}s')
+        return dur
+    return 0
+
+
+def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
+                           heygen_mp4_path, vehicle_photos, vehicle_video_url, tmpdir):
+    """
+    New MVP approach:
+    - Download the vehicle listing video (actual car footage)
+    - Loop/extend it to match the audio duration
+    - Overlay Aaron's HeyGen audio on top
+    - Add a small Aaron picture-in-picture in corner using heygen_mp4
+    - Output final 9:16 MP4
+    """
+    print(f'[Build] Starting walkaround assembly...')
+
+    # Get audio duration
+    audio_dur = get_vehicle_video_duration(heygen_audio_path)
+    if audio_dur < 5:
+        raise RuntimeError(f'Audio too short: {audio_dur}s')
+    print(f'[Build] Audio duration: {audio_dur:.1f}s')
+
+    # Download vehicle listing video
+    vehicle_video_path = None
+    if vehicle_video_url:
+        try:
+            vehicle_video_path = os.path.join(tmpdir, 'vehicle_listing.mp4')
+            print(f'[Build] Downloading vehicle video: {vehicle_video_url}')
+            _download_file(vehicle_video_url, vehicle_video_path)
+        except Exception as e:
+            print(f'[Build] Vehicle video download failed: {e}')
+            vehicle_video_path = None
+
+    # If no listing video, create slideshow from photos
+    if not vehicle_video_path or not os.path.exists(vehicle_video_path) or os.path.getsize(vehicle_video_path) < 10000:
+        print(f'[Build] No vehicle video - building photo slideshow...')
+        vehicle_video_path = _build_photo_slideshow(vehicle_photos, audio_dur, tmpdir)
+    else:
+        print(f'[Build] Using vehicle listing video')
+
+    # Scale/loop vehicle video to match audio duration
+    looped_vehicle = os.path.join(tmpdir, 'vehicle_looped.mp4')
+    loop_cmd = [
         'ffmpeg', '-y',
-        '-f', 'lavfi',
-        '-i', f'color=c=0x{color_hex}:size={W}x{H}:rate=30',
-        '-t', str(duration),
-        '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+        '-stream_loop', '-1',
+        '-i', vehicle_video_path,
+        '-t', str(audio_dur),
+        '-vf', f'scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H}',
+        '-c:v', 'libx264', '-preset', 'fast', '-crf', '22',
         '-pix_fmt', 'yuv420p',
-        output_path
-    ]
-    result = subprocess.run(cmd, capture_output=True)
-    if result.returncode != 0:
-        raise RuntimeError(f'Solid BG failed: {result.stderr.decode(errors="replace")[:300]}')
-
-
-def get_lot_background(tmpdir):
-    lot_path = os.path.join(tmpdir, 'lot_bg.jpg')
-    try:
-        r = requests.get(LOT_BG_URL, headers={
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Referer': 'https://www.google.com/'
-        }, stream=True, timeout=30)
-        if r.status_code == 200 and 'image' in r.headers.get('content-type', ''):
-            with open(lot_path, 'wb') as f:
-                for chunk in r.iter_content(65536):
-                    f.write(chunk)
-            img = Image.open(lot_path).convert('RGB')
-            iw, ih = img.size
-            target_ratio = W / H
-            if iw / ih > target_ratio:
-                new_w = int(ih * target_ratio)
-                x0 = (iw - new_w) // 2
-                img = img.crop((x0, 0, x0 + new_w, ih))
-            else:
-                new_h = int(iw / target_ratio)
-                y0 = (ih - new_h) // 2
-                img = img.crop((0, y0, iw, y0 + new_h))
-            img = img.resize((W, H), Image.LANCZOS)
-            img.save(lot_path, 'JPEG', quality=90)
-            print(f'[Lot BG] Downloaded and saved: {lot_path}')
-            return lot_path
-        else:
-            print(f'[Lot BG] Bad response: {r.status_code} {r.headers.get("content-type")}')
-    except Exception as e:
-        print(f'[Lot BG] Download failed: {e}')
-
-    img = Image.new('RGB', (W, H), (45, 80, 35))
-    img.save(lot_path, 'JPEG')
-    print(f'[Lot BG] Using fallback green background')
-    return lot_path
-
-
-def _make_bg_video(bg_image_path, duration, output_path, tmpdir):
-    is_valid = False
-    try:
-        with Image.open(bg_image_path) as img:
-            img.verify()
-        is_valid = True
-    except Exception as e:
-        print(f'[BG Video] Image invalid: {e}, using solid color fallback')
-
-    if is_valid:
-        cmd = [
-            'ffmpeg', '-y',
-            '-loop', '1',
-            '-i', bg_image_path,
-            '-vf', 'scale=' + str(W) + ':' + str(H) + ':force_original_aspect_ratio=cover,crop=' + str(W) + ':' + str(H),
-            '-t', str(duration),
-            '-r', '30',
-            '-pix_fmt', 'yuv420p',
-            '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
-            output_path
-        ]
-        result = subprocess.run(cmd, capture_output=True)
-        if result.returncode == 0:
-            print(f'[BG Video] Created from image: {output_path}')
-            return
-        stderr = result.stderr.decode('utf-8', errors='replace')
-        print(f'[BG Video] FFmpeg error: {stderr[-500:]}')
-
-    print(f'[BG Video] Using solid color fallback')
-    _make_solid_bg((45, 80, 35), duration, output_path)
-
-
-def composite_avatar_over_background(webm_path, bg_image_path, audio_start, duration, output_mp4, tmpdir):
-    seg_name = os.path.splitext(os.path.basename(output_mp4))[0]
-    bg_video = os.path.join(tmpdir, 'bg_' + seg_name + '.mp4')
-
-    _make_bg_video(bg_image_path, duration, bg_video, tmpdir)
-
-    webm_trim = os.path.join(tmpdir, 'wt_' + seg_name + '.webm')
-    trim_cmd = [
-        'ffmpeg', '-y',
-        '-ss', str(audio_start),
-        '-i', webm_path,
-        '-t', str(duration),
-        '-c:v', 'libvpx-vp9',
         '-an',
-        webm_trim
+        looped_vehicle
     ]
-    subprocess.run(trim_cmd, capture_output=True)
+    result = subprocess.run(loop_cmd, capture_output=True)
+    if result.returncode != 0:
+        raise RuntimeError(f'Vehicle video loop failed: {result.stderr.decode(errors="replace")[-300:]}')
+    print(f'[Build] Vehicle video looped to {audio_dur:.1f}s')
 
-    audio_path = os.path.join(tmpdir, 'aud_' + seg_name + '.aac')
-    audio_cmd = [
+    # Add Aaron PIP (picture-in-picture) in bottom-left corner
+    pip_w = int(W * 0.30)
+    pip_h = int(pip_w * 16 / 9)
+    pip_x = 20
+    pip_y = H - pip_h - 20
+
+    # Scale HeyGen mp4 for PIP
+    pip_video = os.path.join(tmpdir, 'pip_aaron.mp4')
+    pip_cmd = [
         'ffmpeg', '-y',
-        '-ss', str(audio_start),
-        '-i', webm_path,
-        '-t', str(duration),
-        '-vn', '-c:a', 'aac', '-b:a', '192k',
-        audio_path
+        '-stream_loop', '-1',
+        '-i', heygen_mp4_path,
+        '-t', str(audio_dur),
+        '-vf', f'scale={pip_w}:{pip_h}',
+        '-c:v', 'libx264', '-preset', 'fast', '-crf', '22',
+        '-pix_fmt', 'yuv420p',
+        '-an',
+        pip_video
     ]
-    audio_result = subprocess.run(audio_cmd, capture_output=True)
-    has_audio = audio_result.returncode == 0 and os.path.exists(audio_path) and os.path.getsize(audio_path) > 100
+    result = subprocess.run(pip_cmd, capture_output=True)
+    has_pip = result.returncode == 0 and os.path.exists(pip_video) and os.path.getsize(pip_video) > 1000
 
-    aaron_h = int(H * 0.85)
-    aaron_w = int(aaron_h * 9 / 16)
-    aaron_x = (W - aaron_w) // 2
-    aaron_y = H - aaron_h - 10
+    # Composite: vehicle video + Aaron PIP + audio
+    final_path = os.path.join(tmpdir, 'final.mp4')
 
-    overlay_filter = '[1:v]scale=' + str(aaron_w) + ':' + str(aaron_h) + '[avatar];[0:v][avatar]overlay=' + str(aaron_x) + ':' + str(aaron_y) + ':format=auto[out]'
-
-    if has_audio:
+    if has_pip:
+        print(f'[Build] Compositing with Aaron PIP at ({pip_x},{pip_y}) size {pip_w}x{pip_h}')
+        filter_complex = (
+            f'[0:v][1:v]overlay={pip_x}:{pip_y}:format=auto[out]'
+        )
         comp_cmd = [
             'ffmpeg', '-y',
-            '-i', bg_video,
-            '-i', webm_trim,
-            '-i', audio_path,
-            '-filter_complex', overlay_filter,
+            '-i', looped_vehicle,
+            '-i', pip_video,
+            '-i', heygen_audio_path,
+            '-filter_complex', filter_complex,
             '-map', '[out]',
             '-map', '2:a',
-            '-t', str(duration),
+            '-t', str(audio_dur),
             '-c:v', 'libx264', '-preset', 'fast', '-crf', '22',
             '-c:a', 'aac', '-b:a', '192k',
             '-pix_fmt', 'yuv420p',
-            output_mp4
+            '-movflags', '+faststart',
+            final_path
         ]
     else:
+        print(f'[Build] No PIP - vehicle video + audio only')
         comp_cmd = [
             'ffmpeg', '-y',
-            '-i', bg_video,
-            '-i', webm_trim,
-            '-filter_complex', overlay_filter,
-            '-map', '[out]',
-            '-t', str(duration),
+            '-i', looped_vehicle,
+            '-i', heygen_audio_path,
+            '-map', '0:v',
+            '-map', '1:a',
+            '-t', str(audio_dur),
             '-c:v', 'libx264', '-preset', 'fast', '-crf', '22',
+            '-c:a', 'aac', '-b:a', '192k',
             '-pix_fmt', 'yuv420p',
-            '-an',
-            output_mp4
+            '-movflags', '+faststart',
+            final_path
         ]
 
     result = subprocess.run(comp_cmd, capture_output=True)
     if result.returncode != 0:
-        stderr = result.stderr.decode('utf-8', errors='replace')
-        print(f'[Composite] Error (last 500): {stderr[-500:]}')
-        if has_audio:
-            fallback_cmd = [
-                'ffmpeg', '-y',
-                '-i', bg_video,
-                '-i', audio_path,
-                '-c:v', 'copy',
-                '-c:a', 'aac',
-                '-shortest',
-                output_mp4
-            ]
-            subprocess.run(fallback_cmd, capture_output=True)
-        else:
-            shutil.copy(bg_video, output_mp4)
-    else:
-        print(f'[Composite] Created: {output_mp4}')
+        raise RuntimeError(f'Final composite failed: {result.stderr.decode(errors="replace")[-500:]}')
+
+    print(f'[Build] Final assembled: {final_path} ({os.path.getsize(final_path)} bytes)')
+    return final_path
 
 
-def merge_cinematic_with_audio(cinematic_mp4, webm_path, audio_start, duration, output_mp4, tmpdir):
-    seg_name = os.path.splitext(os.path.basename(output_mp4))[0]
+def _build_photo_slideshow(vehicle_photos, total_duration, tmpdir):
+    """Build a slideshow from vehicle photos if no listing video available."""
+    print(f'[Slideshow] Building from {len(vehicle_photos)} photos, duration {total_duration:.1f}s')
 
-    audio_path = os.path.join(tmpdir, 'aud_' + seg_name + '.aac')
-    audio_cmd = [
-        'ffmpeg', '-y',
-        '-ss', str(audio_start),
-        '-i', webm_path,
-        '-t', str(duration),
-        '-vn', '-c:a', 'aac', '-b:a', '192k',
-        audio_path
-    ]
-    audio_result = subprocess.run(audio_cmd, capture_output=True)
-    has_audio = audio_result.returncode == 0 and os.path.exists(audio_path) and os.path.getsize(audio_path) > 100
-
-    cin_trim = os.path.join(tmpdir, 'ct_' + seg_name + '.mp4')
-    trim_cmd = [
-        'ffmpeg', '-y',
-        '-stream_loop', '-1',
-        '-i', cinematic_mp4,
-        '-t', str(duration),
-        '-vf', 'scale=' + str(W) + ':' + str(H) + ':force_original_aspect_ratio=cover,crop=' + str(W) + ':' + str(H),
-        '-c:v', 'libx264', '-preset', 'fast', '-crf', '22',
-        '-pix_fmt', 'yuv420p',
-        '-an',
-        cin_trim
-    ]
-    subprocess.run(trim_cmd, check=True, capture_output=True)
-
-    if has_audio:
-        merge_cmd = [
-            'ffmpeg', '-y',
-            '-i', cin_trim,
-            '-i', audio_path,
-            '-c:v', 'copy',
-            '-c:a', 'aac', '-b:a', '192k',
-            '-shortest',
-            output_mp4
-        ]
-    else:
-        merge_cmd = ['ffmpeg', '-y', '-i', cin_trim, '-c:v', 'copy', '-an', output_mp4]
-    subprocess.run(merge_cmd, check=True, capture_output=True)
-    print(f'[Cinematic+Audio] Created: {output_mp4}')
-
-
-def build_walkaround_video(vehicle, script_segments, heygen_webm_path,
-                           cinematic_clips, vehicle_photos, tmpdir):
-    lot_bg_path = get_lot_background(tmpdir)
-    segment_files = []
-
-    cinematic_map = {idx: path for path, idx in cinematic_clips}
-
-    for i, seg in enumerate(script_segments):
-        seg_type = seg.get('type')
-        audio_start = seg.get('audio_start', 0)
-        duration = seg.get('duration', 5)
-        seg_out = os.path.join(tmpdir, 'seg_' + str(i).zfill(3) + '.mp4')
-
+    downloaded = []
+    for i, url in enumerate(vehicle_photos[:20]):
         try:
-            if seg_type in ('intro', 'outro'):
-                composite_avatar_over_background(heygen_webm_path, lot_bg_path, audio_start, duration, seg_out, tmpdir)
-
-            elif seg_type == 'walkaround':
-                photo_idx = seg.get('photo_index', 0)
-                cin_idx = seg.get('cinematic_index', None)
-
-                if cin_idx is not None and cin_idx in cinematic_map:
-                    merge_cinematic_with_audio(
-                        cinematic_map[cin_idx], heygen_webm_path,
-                        audio_start, duration, seg_out, tmpdir
-                    )
-                elif photo_idx < len(vehicle_photos):
-                    composite_avatar_over_background(
-                        heygen_webm_path, vehicle_photos[photo_idx],
-                        audio_start, duration, seg_out, tmpdir
-                    )
-                else:
-                    composite_avatar_over_background(heygen_webm_path, lot_bg_path, audio_start, duration, seg_out, tmpdir)
-
-            else:
-                composite_avatar_over_background(heygen_webm_path, lot_bg_path, audio_start, duration, seg_out, tmpdir)
-
+            img_path = os.path.join(tmpdir, f'slide_{i:02d}.jpg')
+            r = requests.get(url, headers=HEADERS, timeout=30, stream=True)
+            if r.status_code == 200 and 'image' in r.headers.get('content-type', ''):
+                with open(img_path, 'wb') as f:
+                    for chunk in r.iter_content(65536):
+                        f.write(chunk)
+                # Validate and resize
+                try:
+                    img = Image.open(img_path).convert('RGB')
+                    iw, ih = img.size
+                    tr = W / H
+                    if iw / ih > tr:
+                        nw = int(ih * tr)
+                        x0 = (iw - nw) // 2
+                        img = img.crop((x0, 0, x0 + nw, ih))
+                    else:
+                        nh = int(iw / tr)
+                        y0 = (ih - nh) // 2
+                        img = img.crop((0, y0, iw, y0 + nh))
+                    img = img.resize((W, H), Image.LANCZOS)
+                    img.save(img_path, 'JPEG', quality=85)
+                    downloaded.append(img_path)
+                except Exception as e:
+                    print(f'[Slideshow] Image {i} invalid: {e}')
         except Exception as e:
-            print(f'[Segment {i}] Error: {e}')
-            import traceback
-            traceback.print_exc()
+            print(f'[Slideshow] Download {i} failed: {e}')
 
-        if os.path.exists(seg_out) and os.path.getsize(seg_out) > 1000:
-            segment_files.append(seg_out)
-        else:
-            print(f'[Segment {i}] Missing or empty output: {seg_out}')
+    if not downloaded:
+        raise RuntimeError('No photos available for slideshow')
 
-    if not segment_files:
-        raise RuntimeError('No segments generated successfully')
-
-    final_path = os.path.join(tmpdir, 'final.mp4')
-    concat_file = os.path.join(tmpdir, 'concat.txt')
+    secs_per_photo = total_duration / len(downloaded)
+    concat_file = os.path.join(tmpdir, 'slides.txt')
     with open(concat_file, 'w') as f:
-        for sf in segment_files:
-            f.write("file '" + sf + "'\n")
+        for img_path in downloaded:
+            f.write(f"file '{img_path}'\n")
+            f.write(f'duration {secs_per_photo:.2f}\n')
+        # ffmpeg concat needs a final entry
+        f.write(f"file '{downloaded[-1]}'\n")
 
-    concat_cmd = [
+    slideshow_path = os.path.join(tmpdir, 'slideshow.mp4')
+    cmd = [
         'ffmpeg', '-y',
         '-f', 'concat', '-safe', '0',
         '-i', concat_file,
+        '-vf', f'scale={W}:{H},fps=30',
         '-c:v', 'libx264', '-preset', 'fast', '-crf', '22',
-        '-c:a', 'aac', '-b:a', '192k',
         '-pix_fmt', 'yuv420p',
-        '-movflags', '+faststart',
-        final_path
+        '-an',
+        slideshow_path
     ]
-    result = subprocess.run(concat_cmd, capture_output=True)
+    result = subprocess.run(cmd, capture_output=True)
     if result.returncode != 0:
-        raise RuntimeError(f'Concat failed: {result.stderr.decode(errors="replace")[-500:]}')
-    print(f'[Final] Assembled: {final_path}')
-    return final_path
+        raise RuntimeError(f'Slideshow failed: {result.stderr.decode(errors="replace")[-300:]}')
+    print(f'[Slideshow] Built: {slideshow_path}')
+    return slideshow_path
