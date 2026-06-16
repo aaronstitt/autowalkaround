@@ -4,59 +4,86 @@ import json
 
 client = openai.OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 
-SYSTEM_PROMPT = '''You are an expert automotive salesperson script writer for car dealership walkaround videos.
-Write natural, conversational scripts as if the salesperson is actually at the dealership with the customer, excited and enthusiastic but not pushy.
-The video is edited in this order: salesperson intro -> exterior vehicle photos -> vehicle video clip -> interior vehicle photos -> salesperson outro.
-Structure your script to match this edit flow EXACTLY:
-- intro_script: salesperson introduces themselves and the car (15-20 seconds of speaking)
-- exterior_script: salesperson talks about exterior features as if walking around the outside (25-35 seconds)
-- interior_script: salesperson describes interior features as if sitting inside or showing interior (25-35 seconds)
-- outro_script: warm closing with price and invitation to come see it (10-15 seconds)
-Return ONLY valid JSON with keys:
-  full_script: all four sections combined in order,
-  intro_script: the opening introduction,
-  exterior_script: exterior walkaround section,
-  interior_script: interior features section,
-  outro_script: closing call to action,
-  word_count: total word count
-Keep total under 280 words. Sound like a real person, not a robot.'''
+# Fixed intro/outro that stays the same every time per requirements
+# Only the vehicle-specific details (name, price) are inserted
+FIXED_INTRO_TEMPLATE = (
+    "Hey what is going on guys, {name} here with Immaculate Used Cars. "
+    "I am here today to walk you around this beautiful {year} {make} {model} {trim}. "
+    "Let me show you what she's got."
+)
+
+FIXED_OUTRO_TEMPLATE = (
+    "Guys that is it for this {year} {make} {model} {trim}. "
+    "It is priced at {price}. "
+    "If you are interested give us a call or come on in and we will get you taken care of. "
+    "I am {name} with Immaculate Used Cars - come see us!"
+)
+
+SYSTEM_PROMPT = '''You are an expert automotive salesperson script writer.
+Write a natural, conversational walkaround video script as if the salesperson is physically walking around the vehicle with the customer.
+
+CRITICAL RULES:
+1. Use ONLY the Highlighted Features provided - do not invent or add any features
+2. Mention features in this order: exterior features first, then interior features
+3. Write as if physically pointing at each feature while standing at the car
+4. Sound like a real person talking, not reading from a list
+5. Voice inflection should vary - use enthusiasm for great features, be informative for specs
+6. Do NOT include intro or outro - those are handled separately
+7. Keep total between 150-220 words for the feature walkthrough section only
+
+Return ONLY valid JSON with these keys:
+exterior_script: talking about exterior highlighted features while walking the outside
+interior_script: talking about interior highlighted features while showing inside
+full_script: exterior_script + interior_script combined
+word_count: total word count'''
 
 def generate_walkaround_script(vehicle, salesperson_name, dealer_name=''):
-    exterior = vehicle.get('exterior_features', [])
-    interior = vehicle.get('interior_features', [])
-    name = vehicle.get('name', 'this vehicle')
     year = vehicle.get('year', '')
     make = vehicle.get('make', '')
     model = vehicle.get('model', '')
-    color = vehicle.get('color', '')
+    trim = vehicle.get('name', '').replace(str(year), '').replace(str(make), '').replace(str(model), '').strip()
     price = vehicle.get('price', '')
-    mileage = vehicle.get('mileage', '')
-    fuel = vehicle.get('fuel_efficiency', '')
-    drivetrain = vehicle.get('drivetrain', '')
+    highlighted = vehicle.get('highlighted_features', [])
+    exterior = vehicle.get('exterior_features', [])
+    interior = vehicle.get('interior_features', [])
 
-    ext_list = chr(10).join(f'- {f}' for f in exterior)
-    int_list = chr(10).join(f'- {f}' for f in interior)
+    # Build fixed intro and outro
+    intro_script = FIXED_INTRO_TEMPLATE.format(
+        name=salesperson_name,
+        year=year, make=make, model=model,
+        trim=trim or '',
+    ).strip()
+
+    outro_script = FIXED_OUTRO_TEMPLATE.format(
+        name=salesperson_name,
+        year=year, make=make, model=model,
+        trim=trim or '',
+        price=('$' + str(price)) if price else 'a great price',
+    ).strip()
+
+    # Only use highlighted features for the main script content
+    # Use all highlighted if categorization is sparse
+    if len(exterior) + len(interior) < 3:
+        exterior = highlighted[:int(len(highlighted) * 0.6)]
+        interior = highlighted[int(len(highlighted) * 0.6):]
+
+    ext_list = chr(10).join('- ' + f for f in exterior)
+    int_list = chr(10).join('- ' + f for f in interior)
+    all_features = chr(10).join('- ' + f for f in highlighted)
 
     prompt = (
-        'Write a walkaround video script for this vehicle.\n'
-        + 'VEHICLE: ' + str(year) + ' ' + str(make) + ' ' + str(model) + ' - ' + str(color) + '\n'
-        + 'TRIM: ' + str(name) + '\n'
+        'Write the walkaround feature script for this vehicle.\n'
+        + 'VEHICLE: ' + str(year) + ' ' + str(make) + ' ' + str(model) + ' ' + str(trim) + '\n'
         + 'PRICE: $' + str(price) + '\n'
-        + 'MILEAGE: ' + str(mileage) + '\n'
-        + 'FUEL: ' + str(fuel) + '  DRIVETRAIN: ' + str(drivetrain) + '\n'
-        + 'DEALERSHIP: ' + str(dealer_name or 'Immaculate Used Cars') + '\n'
-        + 'SALESPERSON: ' + str(salesperson_name) + '\n'
-        + '\nEXTERIOR FEATURES to mention while showing outside of car:\n'
-        + ext_list + '\n'
-        + '\nINTERIOR FEATURES to mention while showing inside of car:\n'
-        + int_list + '\n'
-        + '\nWrite 4 sections:\n'
-        + '1. INTRO (15-20 sec): ' + str(salesperson_name) + ' introduces themselves at the dealership and introduces the car enthusiastically\n'
-        + '2. EXTERIOR (25-35 sec): Walking around the outside pointing out the exterior highlights listed above\n'
-        + '3. INTERIOR (25-35 sec): Inside the car describing the interior features listed above\n'
-        + '4. OUTRO (10-15 sec): Mention price $' + str(price) + ', warm invitation to come test drive, give ' + str(dealer_name or 'Immaculate Used Cars') + ' a call\n'
-        + '\nSound natural and conversational. Speak directly to camera like a real salesperson would.\n'
-        + 'Total under 280 words.'
+        + '\nHIGHLIGHTED FEATURES FROM LISTING PAGE (use ONLY these - in this order):\n'
+        + 'EXTERIOR features to mention while walking the outside:\n'
+        + (ext_list if ext_list else all_features[:len(all_features)//2]) + '\n'
+        + '\nINTERIOR features to mention while showing inside the car:\n'
+        + (int_list if int_list else all_features[len(all_features)//2:]) + '\n'
+        + '\nWrite ONLY the exterior and interior sections (not intro or outro).\n'
+        + 'Sound like you are physically pointing at each feature.\n'
+        + 'Voice should vary - excited about great features, informative about specs.\n'
+        + '150-220 words total.'
     )
 
     response = client.chat.completions.create(
@@ -67,18 +94,23 @@ def generate_walkaround_script(vehicle, salesperson_name, dealer_name=''):
     )
     result = json.loads(response.choices[0].message.content)
 
-    intro_s = result.get('intro_script', '')
     exterior_s = result.get('exterior_script', '')
     interior_s = result.get('interior_script', '')
-    outro_s = result.get('outro_script', '')
+    full_feature = result.get('full_script', '')
+    if not full_feature:
+        full_feature = ' '.join(filter(None, [exterior_s, interior_s]))
 
-    full = result.get('full_script', '')
-    if not full:
-        full = ' '.join(filter(None, [intro_s, exterior_s, interior_s, outro_s]))
+    # Combine: fixed intro + AI features + fixed outro
+    full_script = ' '.join(filter(None, [intro_script, full_feature, outro_script]))
 
-    result['full_script'] = full
-    result['intro_script'] = intro_s
-    result['exterior_script'] = exterior_s
-    result['interior_script'] = interior_s
-    result['outro_script'] = outro_s
-    return result
+    # Build year_make_model for video overlay text
+    vehicle['year_make_model'] = ' '.join(filter(None, [str(year), str(make), str(model), str(trim)]))
+
+    return {
+        'full_script': full_script,
+        'intro_script': intro_script,
+        'exterior_script': exterior_s,
+        'interior_script': interior_s,
+        'outro_script': outro_script,
+        'word_count': len(full_script.split()),
+    }
