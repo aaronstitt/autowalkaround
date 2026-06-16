@@ -27,13 +27,11 @@ def get_look_id(avatar_group_id):
         if r.status_code == 200:
             data = r.json().get('data', [])
             looks = data if isinstance(data, list) else data.get('looks', [])
-            # Prefer looks with 'sharp', 'car', 'lot', 'outdoor', 'salesman' in name
             preferred_keywords = ['sharp', 'car', 'lot', 'outdoor', 'salesman', 'used']
             for look in looks:
                 name = (look.get('name') or look.get('look_name') or '').lower()
                 if any(kw in name for kw in preferred_keywords):
                     return look.get('id') or look.get('look_id')
-            # Fall back to first look
             if looks:
                 return looks[0].get('id') or looks[0].get('look_id')
     except Exception as e:
@@ -42,14 +40,9 @@ def get_look_id(avatar_group_id):
 
 # ==============================================================
 # STEP 2: Generate HeyGen Avatar V video - talking + WALKING motion
-# Output: webm with transparent background (Aaron walks & talks)
+# output_format=webm gives transparent alpha channel
 # ==============================================================
 def generate_heygen_webm(script_text, avatar_look_id, voice_id, tmpdir):
-    """
-    Generate Avatar V video with motion_prompt for walking movement.
-    output_format=webm gives transparent alpha channel - no green screen needed.
-    Returns local path to downloaded webm file.
-    """
     print('[HeyGen] Generating Avatar V webm with walking motion...')
     
     motion_prompt = (
@@ -78,7 +71,6 @@ def generate_heygen_webm(script_text, avatar_look_id, voice_id, tmpdir):
     video_id = r.json()['data']['video_id']
     print(f'[HeyGen] Video ID: {video_id} - polling...')
     
-    # Poll until complete
     for i in range(120):
         time.sleep(10)
         sr = requests.get(HEYGEN_BASE + '/v3/videos/' + video_id, headers=heygen_headers(), timeout=30)
@@ -100,31 +92,22 @@ def generate_heygen_webm(script_text, avatar_look_id, voice_id, tmpdir):
 
 # ==============================================================
 # STEP 3: Generate Cinematic Avatar clips - Aaron WALKING around vehicle
-# These are silent visual-only clips showing Aaron moving around the car
 # ==============================================================
 def generate_cinematic_clip(look_id, vehicle_photos, vehicle_name, lot_bg_path, duration, tmpdir, clip_index):
-    """
-    Generate a cinematic avatar clip showing Aaron walking around a vehicle.
-    Uses vehicle photos as references so HeyGen knows what vehicle to show.
-    Returns local path to downloaded mp4.
-    """
     print(f'[Cinematic] Generating clip {clip_index} ({duration}s)...')
     
-    # Build references from vehicle photos (up to 3 images per clip per API limit)
-    references = []
-    # Add lot background as style reference
-    references.append({'type': 'url', 'url': LOT_BG_URL})
-    # Add up to 2 vehicle photos
+    references = [{'type': 'url', 'url': LOT_BG_URL}]
     for photo_url in vehicle_photos[:2]:
         references.append({'type': 'url', 'url': photo_url})
     
     prompt = (
-        f"A professional used car salesman in a blue button-up shirt walks around a {vehicle_name} "
-        f"on a used car dealership lot. He moves from the front to the side of the vehicle, "
-        f"gesturing toward specific parts of the car. Shot handheld in selfie-style POV, "
-        f"as if the salesman is holding the camera while walking. "
-        f"The vehicle is prominently visible in the background as he walks around it. "
-        f"Bright daylight, natural lighting, used car lot setting."
+        "A professional used car salesman in a blue button-up shirt walks around a "
+        + vehicle_name +
+        " on a used car dealership lot. He moves from the front to the side of the vehicle, "
+        "gesturing toward specific parts of the car. Shot handheld in selfie-style POV, "
+        "as if the salesman is holding the camera while walking. "
+        "The vehicle is prominently visible in the background as he walks around it. "
+        "Bright daylight, natural lighting, used car lot setting."
     )
     
     payload = {
@@ -153,7 +136,7 @@ def generate_cinematic_clip(look_id, vehicle_photos, vehicle_name, lot_bg_path, 
         status = vdata.get('status', 'unknown')
         if status == 'completed':
             video_url = vdata.get('video_url')
-            clip_path = os.path.join(tmpdir, f'cinematic_{clip_index:02d}.mp4')
+            clip_path = os.path.join(tmpdir, 'cinematic_' + str(clip_index).zfill(2) + '.mp4')
             _download_file(video_url, clip_path)
             print(f'[Cinematic] Clip {clip_index} downloaded')
             return clip_path
@@ -181,9 +164,7 @@ def get_lot_background(tmpdir):
     lot_path = os.path.join(tmpdir, 'lot_bg.jpg')
     try:
         _download_file(LOT_BG_URL, lot_path)
-        # Crop/resize to 9:16 portrait
         img = Image.open(lot_path).convert('RGB')
-        # Crop center to portrait
         iw, ih = img.size
         target_ratio = W / H
         if iw / ih > target_ratio:
@@ -200,140 +181,61 @@ def get_lot_background(tmpdir):
         return lot_path
     except Exception as e:
         print(f'[Lot BG] Failed to download: {e}')
-        # Create solid dark background
         img = Image.new('RGB', (W, H), (30, 40, 30))
         img.save(lot_path, 'JPEG')
         return lot_path
 
 # ==============================================================
-# STEP 5: Composite webm alpha (Aaron) over vehicle photo background
-# This creates the "Aaron standing in front of vehicle" effect using FFmpeg
+# STEP 5: Create background video from still image (simple, no zoompan)
 # ==============================================================
-def composite_avatar_over_background(webm_path, bg_image_path, audio_start, duration, output_mp4, tmpdir):
-    """
-    Aaron (webm with alpha) composited over a vehicle photo background.
-    Aaron is positioned center-bottom (selfie POV), vehicle photo fills full frame behind him.
-    FFmpeg handles the alpha blending natively with webm.
-    """
-    # First prepare a looping background video from the still image
-    bg_video = os.path.join(tmpdir, f'bg_{os.path.basename(output_mp4)}.mp4')
-    
-    # Create background video from image with Ken Burns zoom effect
-    zoom_scale = 1.05 + (hash(bg_image_path) % 10) * 0.005  # slight zoom per image
-    
-    # Scale image to fill frame with slight zoom
-    bg_cmd = [
+def _make_bg_video(bg_image_path, duration, output_path, tmpdir):
+    """Create a looping background video from a still image. Simple scale/crop - no zoompan."""
+    cmd = [
         'ffmpeg', '-y',
-        '-loop', '1', '-i', bg_image_path,
-        '-vf', (
-            f'scale={W}:{H}:force_original_aspect_ratio=cover,'
-            f'crop={W}:{H},'
-            f'zoompan=z=\'if(lte(zoom,1.0),1.0,zoom-0.0005)\':x=\'iw/2-(iw/zoom/2)\':y=\'ih*0.3-(ih/zoom/2)\':d={int(duration*30)}:s={W}x{H}:fps=30'
-        ),
+        '-loop', '1',
+        '-i', bg_image_path,
+        '-vf', 'scale=' + str(W) + ':' + str(H) + ':force_original_aspect_ratio=cover,crop=' + str(W) + ':' + str(H),
         '-t', str(duration),
         '-r', '30',
         '-pix_fmt', 'yuv420p',
         '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
-        bg_video
+        output_path
     ]
-    subprocess.run(bg_cmd, check=True, capture_output=True)
+    result = subprocess.run(cmd, capture_output=True)
+    if result.returncode != 0:
+        stderr = result.stderr.decode('utf-8', errors='replace')
+        print(f'[BG Video] Error: {stderr[:500]}')
+        raise RuntimeError(f'FFmpeg bg video failed: {stderr[:200]}')
+
+# ==============================================================
+# STEP 6: Composite webm alpha (Aaron) over vehicle/lot background
+# ==============================================================
+def composite_avatar_over_background(webm_path, bg_image_path, audio_start, duration, output_mp4, tmpdir):
+    """
+    Aaron (webm with alpha) composited over background image.
+    Aaron centered, full frame. Background fills frame behind him.
+    """
+    seg_name = os.path.splitext(os.path.basename(output_mp4))[0]
+    bg_video = os.path.join(tmpdir, 'bg_' + seg_name + '.mp4')
     
-    # Trim the webm to this segment's audio window
-    webm_trim = os.path.join(tmpdir, f'webm_trim_{os.path.basename(output_mp4)}.webm')
+    # Create background video
+    _make_bg_video(bg_image_path, duration, bg_video, tmpdir)
+    
+    # Trim webm to segment
+    webm_trim = os.path.join(tmpdir, 'wt_' + seg_name + '.webm')
     trim_cmd = [
         'ffmpeg', '-y',
         '-ss', str(audio_start),
         '-i', webm_path,
         '-t', str(duration),
-        '-c:v', 'libvpx-vp9', '-c:a', 'copy',
+        '-c:v', 'libvpx-vp9',
+        '-an',
         webm_trim
     ]
-    result = subprocess.run(trim_cmd, capture_output=True)
-    if result.returncode != 0:
-        # webm may not have audio, just copy video
-        trim_cmd2 = [
-            'ffmpeg', '-y',
-            '-ss', str(audio_start),
-            '-i', webm_path,
-            '-t', str(duration),
-            '-c:v', 'libvpx-vp9', '-an',
-            webm_trim
-        ]
-        subprocess.run(trim_cmd2, check=True, capture_output=True)
+    subprocess.run(trim_cmd, capture_output=True)
     
-    # Composite: bg video (vehicle photo) + Aaron (webm alpha) overlaid centered-bottom
-    # Aaron is scaled to 80% of frame height, positioned at center-bottom
-    aaron_h = int(H * 0.80)
-    aaron_w = int(aaron_h * (9/16))
-    aaron_x = (W - aaron_w) // 2
-    aaron_y = H - aaron_h - 20  # 20px from bottom
-    
-    # Extract audio from main webm
-    audio_from_webm = os.path.join(tmpdir, f'audio_{os.path.basename(output_mp4)}.aac')
-    audio_cmd = [
-        'ffmpeg', '-y',
-        '-ss', str(audio_start),
-        '-i', webm_path,
-        '-t', str(duration),
-        '-vn', '-c:a', 'aac', '-b:a', '192k',
-        audio_from_webm
-    ]
-    audio_result = subprocess.run(audio_cmd, capture_output=True)
-    has_audio = audio_result.returncode == 0 and os.path.exists(audio_from_webm) and os.path.getsize(audio_from_webm) > 100
-    
-    # Build composite command
-    if has_audio:
-        composite_cmd = [
-            'ffmpeg', '-y',
-            '-i', bg_video,
-            '-i', webm_trim,
-            '-i', audio_from_webm,
-            '-filter_complex', (
-                f'[1:v]scale={aaron_w}:{aaron_h}[avatar];'
-                f'[0:v][avatar]overlay={aaron_x}:{aaron_y}:format=auto[out]'
-            ),
-            '-map', '[out]',
-            '-map', '2:a',
-            '-t', str(duration),
-            '-c:v', 'libx264', '-preset', 'fast', '-crf', '22',
-            '-c:a', 'aac', '-b:a', '192k',
-            '-pix_fmt', 'yuv420p',
-            output_mp4
-        ]
-    else:
-        composite_cmd = [
-            'ffmpeg', '-y',
-            '-i', bg_video,
-            '-i', webm_trim,
-            '-filter_complex', (
-                f'[1:v]scale={aaron_w}:{aaron_h}[avatar];'
-                f'[0:v][avatar]overlay={aaron_x}:{aaron_y}:format=auto[out]'
-            ),
-            '-map', '[out]',
-            '-t', str(duration),
-            '-c:v', 'libx264', '-preset', 'fast', '-crf', '22',
-            '-pix_fmt', 'yuv420p',
-            '-an',
-            output_mp4
-        ]
-    
-    subprocess.run(composite_cmd, check=True, capture_output=True)
-    print(f'[Composite] Created: {output_mp4}')
-
-# ==============================================================
-# STEP 6: Use cinematic clip as visual with webm audio
-# Aaron is ACTUALLY WALKING in the cinematic clip
-# The voice from the webm is synced on top
-# ==============================================================
-def merge_cinematic_with_audio(cinematic_mp4, webm_path, audio_start, duration, output_mp4, tmpdir):
-    """
-    Take a cinematic clip (Aaron walking around vehicle, silent) and
-    overlay the voice audio from the HeyGen webm. This gives us:
-    - Aaron actually walking around the vehicle (cinematic visual)
-    - Aaron's voice narrating the script (webm audio)
-    """
     # Extract audio from webm
-    audio_path = os.path.join(tmpdir, f'aud_{os.path.basename(output_mp4)}.aac')
+    audio_path = os.path.join(tmpdir, 'aud_' + seg_name + '.aac')
     audio_cmd = [
         'ffmpeg', '-y',
         '-ss', str(audio_start),
@@ -345,14 +247,90 @@ def merge_cinematic_with_audio(cinematic_mp4, webm_path, audio_start, duration, 
     audio_result = subprocess.run(audio_cmd, capture_output=True)
     has_audio = audio_result.returncode == 0 and os.path.exists(audio_path) and os.path.getsize(audio_path) > 100
     
-    # Trim cinematic to needed duration
-    cin_trim = os.path.join(tmpdir, f'cin_trim_{os.path.basename(output_mp4)}.mp4')
+    # Aaron positioned center, full height
+    aaron_h = int(H * 0.85)
+    aaron_w = int(aaron_h * 9 / 16)
+    aaron_x = (W - aaron_w) // 2
+    aaron_y = H - aaron_h - 10
+    
+    overlay_filter = '[1:v]scale=' + str(aaron_w) + ':' + str(aaron_h) + '[avatar];[0:v][avatar]overlay=' + str(aaron_x) + ':' + str(aaron_y) + ':format=auto[out]'
+    
+    if has_audio:
+        comp_cmd = [
+            'ffmpeg', '-y',
+            '-i', bg_video,
+            '-i', webm_trim,
+            '-i', audio_path,
+            '-filter_complex', overlay_filter,
+            '-map', '[out]',
+            '-map', '2:a',
+            '-t', str(duration),
+            '-c:v', 'libx264', '-preset', 'fast', '-crf', '22',
+            '-c:a', 'aac', '-b:a', '192k',
+            '-pix_fmt', 'yuv420p',
+            output_mp4
+        ]
+    else:
+        comp_cmd = [
+            'ffmpeg', '-y',
+            '-i', bg_video,
+            '-i', webm_trim,
+            '-filter_complex', overlay_filter,
+            '-map', '[out]',
+            '-t', str(duration),
+            '-c:v', 'libx264', '-preset', 'fast', '-crf', '22',
+            '-pix_fmt', 'yuv420p',
+            '-an',
+            output_mp4
+        ]
+    
+    result = subprocess.run(comp_cmd, capture_output=True)
+    if result.returncode != 0:
+        stderr = result.stderr.decode('utf-8', errors='replace')
+        print(f'[Composite] Error: {stderr[:500]}')
+        # Try fallback: just use bg video with audio
+        if has_audio:
+            fallback_cmd = [
+                'ffmpeg', '-y',
+                '-i', bg_video,
+                '-i', audio_path,
+                '-c:v', 'copy',
+                '-c:a', 'aac',
+                '-shortest',
+                output_mp4
+            ]
+            subprocess.run(fallback_cmd, check=True, capture_output=True)
+        else:
+            shutil.copy(bg_video, output_mp4)
+    else:
+        print(f'[Composite] Created: {output_mp4}')
+
+# ==============================================================
+# STEP 7: Use cinematic clip as visual with webm audio
+# ==============================================================
+def merge_cinematic_with_audio(cinematic_mp4, webm_path, audio_start, duration, output_mp4, tmpdir):
+    """Cinematic clip (Aaron walking) + voice audio from webm."""
+    seg_name = os.path.splitext(os.path.basename(output_mp4))[0]
+    
+    audio_path = os.path.join(tmpdir, 'aud_' + seg_name + '.aac')
+    audio_cmd = [
+        'ffmpeg', '-y',
+        '-ss', str(audio_start),
+        '-i', webm_path,
+        '-t', str(duration),
+        '-vn', '-c:a', 'aac', '-b:a', '192k',
+        audio_path
+    ]
+    audio_result = subprocess.run(audio_cmd, capture_output=True)
+    has_audio = audio_result.returncode == 0 and os.path.exists(audio_path) and os.path.getsize(audio_path) > 100
+    
+    cin_trim = os.path.join(tmpdir, 'ct_' + seg_name + '.mp4')
     trim_cmd = [
         'ffmpeg', '-y',
-        '-stream_loop', '-1',  # loop if cinematic is shorter than needed duration
+        '-stream_loop', '-1',
         '-i', cinematic_mp4,
         '-t', str(duration),
-        '-vf', f'scale={W}:{H}:force_original_aspect_ratio=cover,crop={W}:{H}',
+        '-vf', 'scale=' + str(W) + ':' + str(H) + ':force_original_aspect_ratio=cover,crop=' + str(W) + ':' + str(H),
         '-c:v', 'libx264', '-preset', 'fast', '-crf', '22',
         '-pix_fmt', 'yuv420p',
         '-an',
@@ -371,38 +349,15 @@ def merge_cinematic_with_audio(cinematic_mp4, webm_path, audio_start, duration, 
             output_mp4
         ]
     else:
-        merge_cmd = [
-            'ffmpeg', '-y',
-            '-i', cin_trim,
-            '-c:v', 'copy',
-            '-an',
-            output_mp4
-        ]
+        merge_cmd = ['ffmpeg', '-y', '-i', cin_trim, '-c:v', 'copy', '-an', output_mp4]
     subprocess.run(merge_cmd, check=True, capture_output=True)
     print(f'[Cinematic+Audio] Created: {output_mp4}')
-
-# ==============================================================
-# STEP 7: Build intro/outro - Aaron on lot background
-# ==============================================================
-def build_intro_outro_segment(webm_path, lot_bg_path, audio_start, duration, output_mp4, tmpdir):
-    """
-    Intro/outro: Aaron (full frame transparent) composited on lot background.
-    Aaron centered, lot background fills frame.
-    """
-    composite_avatar_over_background(webm_path, lot_bg_path, audio_start, duration, output_mp4, tmpdir)
 
 # ==============================================================
 # MAIN ORCHESTRATOR
 # ==============================================================
 def build_walkaround_video(vehicle, script_segments, heygen_webm_path, 
                            cinematic_clips, vehicle_photos, tmpdir):
-    """
-    Assemble the final walkaround video from:
-    - heygen_webm_path: Avatar V webm with transparent walking Aaron + voice
-    - cinematic_clips: list of (path, segment_index) Cinematic Avatar clips
-    - vehicle_photos: downloaded vehicle photo paths
-    - script_segments: list of dicts with {type, duration, audio_start, photo_index}
-    """
     lot_bg_path = get_lot_background(tmpdir)
     segment_files = []
     
@@ -412,45 +367,48 @@ def build_walkaround_video(vehicle, script_segments, heygen_webm_path,
         seg_type = seg.get('type')
         audio_start = seg.get('audio_start', 0)
         duration = seg.get('duration', 5)
-        seg_out = os.path.join(tmpdir, f'seg_{i:03d}.mp4')
+        seg_out = os.path.join(tmpdir, 'seg_' + str(i).zfill(3) + '.mp4')
         
-        if seg_type in ('intro', 'outro'):
-            build_intro_outro_segment(heygen_webm_path, lot_bg_path, audio_start, duration, seg_out, tmpdir)
-        
-        elif seg_type == 'walkaround':
-            photo_idx = seg.get('photo_index', 0)
-            cin_idx = seg.get('cinematic_index', None)
+        try:
+            if seg_type in ('intro', 'outro'):
+                composite_avatar_over_background(heygen_webm_path, lot_bg_path, audio_start, duration, seg_out, tmpdir)
             
-            if cin_idx is not None and cin_idx in cinematic_map:
-                # Use cinematic clip (Aaron walking around vehicle) with voice audio
-                merge_cinematic_with_audio(
-                    cinematic_map[cin_idx], heygen_webm_path,
-                    audio_start, duration, seg_out, tmpdir
-                )
-            elif photo_idx < len(vehicle_photos):
-                # Fall back: Aaron (webm) composited over vehicle photo
-                composite_avatar_over_background(
-                    heygen_webm_path, vehicle_photos[photo_idx],
-                    audio_start, duration, seg_out, tmpdir
-                )
+            elif seg_type == 'walkaround':
+                photo_idx = seg.get('photo_index', 0)
+                cin_idx = seg.get('cinematic_index', None)
+                
+                if cin_idx is not None and cin_idx in cinematic_map:
+                    merge_cinematic_with_audio(
+                        cinematic_map[cin_idx], heygen_webm_path,
+                        audio_start, duration, seg_out, tmpdir
+                    )
+                elif photo_idx < len(vehicle_photos):
+                    composite_avatar_over_background(
+                        heygen_webm_path, vehicle_photos[photo_idx],
+                        audio_start, duration, seg_out, tmpdir
+                    )
+                else:
+                    composite_avatar_over_background(heygen_webm_path, lot_bg_path, audio_start, duration, seg_out, tmpdir)
+            
             else:
-                build_intro_outro_segment(heygen_webm_path, lot_bg_path, audio_start, duration, seg_out, tmpdir)
+                composite_avatar_over_background(heygen_webm_path, lot_bg_path, audio_start, duration, seg_out, tmpdir)
         
-        else:
-            build_intro_outro_segment(heygen_webm_path, lot_bg_path, audio_start, duration, seg_out, tmpdir)
+        except Exception as e:
+            print(f'[Segment {i}] Error: {e}')
+            import traceback
+            traceback.print_exc()
         
-        if os.path.exists(seg_out):
+        if os.path.exists(seg_out) and os.path.getsize(seg_out) > 1000:
             segment_files.append(seg_out)
     
     if not segment_files:
-        raise RuntimeError('No segments generated')
+        raise RuntimeError('No segments generated successfully')
     
-    # Concatenate all segments
     final_path = os.path.join(tmpdir, 'final.mp4')
     concat_file = os.path.join(tmpdir, 'concat.txt')
     with open(concat_file, 'w') as f:
         for sf in segment_files:
-            f.write(f"file '{sf}'\n")
+            f.write("file '" + sf + "'\n")
     
     concat_cmd = [
         'ffmpeg', '-y',
