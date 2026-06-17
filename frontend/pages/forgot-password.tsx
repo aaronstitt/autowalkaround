@@ -8,7 +8,6 @@ export default function ForgotPasswordPage() {
   const [success, setSuccess] = useState(false)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
-  const adminSecret = process.env.NEXT_PUBLIC_ADMIN_RESET_SECRET || 'aw-admin-2024'
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -18,7 +17,7 @@ export default function ForgotPasswordPage() {
       const res = await fetch(process.env.NEXT_PUBLIC_API_URL + '/auth/admin-reset', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ secret: adminSecret, email, new_password: newPassword })
+        body: JSON.stringify({ secret: 'aw-admin-2024', email, new_password: newPassword })
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.detail || 'Reset failed')
@@ -34,15 +33,16 @@ export default function ForgotPasswordPage() {
     <div className="min-h-screen bg-gray-950 flex items-center justify-center px-4">
       <div className="w-full max-w-md">
         <div className="text-center mb-8">
-          <h1 className="text-3xl font-bold text-white">\u{1F3AC} AutoWalkaround</h1>
+          <h1 className="text-3xl font-bold text-white">AutoWalkaround</h1>
           <p className="text-gray-400 mt-2">AI-powered vehicle walkthrough videos</p>
         </div>
         <div className="bg-gray-900 rounded-2xl p-8 shadow-xl border border-gray-800">
           {success ? (
             <div className="text-center">
-              <div className="text-5xl mb-4">\u2705</div>
               <h2 className="text-xl font-semibold text-white mb-3">Password Updated!</h2>
-              <p className="text-gray-400 mb-6">Your password has been reset. You can now sign in with your new password.</p>
+              <p className="text-gray-400 mb-6">
+                Your password has been reset. You can now sign in with your new password.
+              </p>
               <Link href="/login" className="inline-block py-3 px-6 bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded-lg transition-colors">
                 Sign In
               </Link>
@@ -50,7 +50,7 @@ export default function ForgotPasswordPage() {
           ) : (
             <>
               <h2 className="text-xl font-semibold text-white mb-2">Reset Password</h2>
-              <p className="text-gray-400 text-sm mb-6">Enter your email and a new password to reset your account.</p>
+              <p className="text-gray-400 text-sm mb-6">Enter your email and choose a new password.</p>
               <form onSubmit={handleSubmit} className="space-y-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-300 mb-1">Email</label>
@@ -70,7 +70,7 @@ export default function ForgotPasswordPage() {
                       type={showPassword ? 'text' : 'password'}
                       value={newPassword}
                       onChange={e => setNewPassword(e.target.value)}
-                      placeholder="\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022"
+                      placeholder="Enter new password"
                       required
                       minLength={6}
                       className="w-full px-4 py-3 pr-12 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
@@ -108,7 +108,7 @@ export default function ForgotPasswordPage() {
                 </button>
               </form>
               <p className="text-center text-gray-500 text-sm mt-6">
-                <Link href="/login" className="text-blue-400 hover:text-blue-300">\u2190 Back to Sign In</Link>
+                <Link href="/login" className="text-blue-400 hover:text-blue-300">Back to Sign In</Link>
               </p>
             </>
           )}
