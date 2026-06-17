@@ -127,18 +127,19 @@ async def _run_pipeline(job_id, vehicle_url, salesperson_id, dealership_id, page
         if not full_script:
             raise ValueError('Script generation failed')
 
-        upd('rendering', 'Generating AI voice (this takes 30-45 min)...')
-        audio_path, heygen_mp4_path = await loop.run_in_executor(
+        upd('rendering', 'Generating AI avatar video with transparent background (30-45 min)...')
+        heygen_result = await loop.run_in_executor(
             None,
             lambda: generate_heygen_audio(full_script, look_id, voice_id, tmpdir)
         )
+        heygen_path, heygen_fmt = heygen_result
 
-        upd('assembling', 'Assembling walkaround video...')
+        upd('assembling', 'Compositing Aaron over vehicle photos...')
         final_path = await loop.run_in_executor(None, lambda: build_walkaround_video(
             vehicle=vehicle,
             script_segments=script_data.get('segments', []),
-            heygen_audio_path=audio_path,
-            heygen_mp4_path=heygen_mp4_path,
+            heygen_audio_path=heygen_path,
+            heygen_result=heygen_result,
             vehicle_photos=photos,
             vehicle_video_url=vehicle_video_url,
             tmpdir=tmpdir
