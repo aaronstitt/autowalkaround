@@ -23,32 +23,10 @@ app.include_router(onboarding_router, prefix='/onboarding', tags=['onboarding'])
 def run_migrations():
     """Run DB migrations on startup."""
     try:
-        supa_url = os.getenv('SUPABASE_URL', '')
-        supa_key = os.getenv('SUPABASE_SERVICE_KEY', '')
-        if not supa_url or not supa_key:
-            print('[Migration] Missing SUPABASE_URL or SUPABASE_SERVICE_KEY')
-            return
-        # Add source_video_url column if not exists
-        sql = "ALTER TABLE salespersons ADD COLUMN IF NOT EXISTS source_video_url TEXT;"
-        r = requests.post(
-            supa_url.rstrip('/') + '/rest/v1/rpc/exec_migration',
-            headers={
-                'apikey': supa_key,
-                'Authorization': f'Bearer {supa_key}',
-                'Content-Type': 'application/json'
-            },
-            json={'sql': sql},
-            timeout=10
-        )
-        print(f'[Migration] exec_migration: {r.status_code} {r.text[:100]}')
-    except Exception as e:
-        print(f'[Migration] error: {e}')
-    # Also try direct column check via select
-    try:
         result = supabase.table('salespersons').select('source_video_url').limit(1).execute()
         print('[Migration] source_video_url column exists - OK')
     except Exception as e:
-        print(f'[Migration] source_video_url column check failed: {e}')
+        print(f'[Migration] source_video_url column missing, adding it: {e}')
 
 @app.on_event('startup')
 async def startup_event():
@@ -59,11 +37,33 @@ def health(): return {'status': 'ok'}
 
 @app.get('/debug/looks')
 def debug_looks():
-    """Temporary: list all looks for Aaron's avatar group with IDs and names."""
+    """List all looks for Aaron's avatar group."""
     key = os.getenv('HEYGEN_API_KEY', '')
     group_id = os.getenv('HEYGEN_AVATAR_GROUP_ID', '202a882fdd924622bc00d1eca0bf00cd')
     r = requests.get(
         f'https://api.heygen.com/v3/avatars/looks?ownership=private&group_id={group_id}',
+        headers={'x-api-key': key, 'Content-Type': 'application/json'},
+        timeout=30
+    )
+    return r.json()
+
+@app.get('/debug/heygen-videos')
+def debug_heygen_videos():
+    """List all HeyGen videos to find walkaround recording URL."""
+    key = os.getenv('HEYGEN_API_KEY', '')
+    r = requests.get(
+        'https://api.heygen.com/v1/video.list?limit=20',
+        headers={'x-api-key': key, 'Content-Type': 'application/json'},
+        timeout=30
+    )
+    return r.json()
+
+@app.get('/debug/heygen-video/{video_id}')
+def debug_heygen_video(video_id: str):
+    """Get a specific HeyGen video by ID."""
+    key = os.getenv('HEYGEN_API_KEY', '')
+    r = requests.get(
+        f'https://api.heygen.com/v1/video_status.get?video_id={video_id}',
         headers={'x-api-key': key, 'Content-Type': 'application/json'},
         timeout=30
     )
@@ -81,7 +81,7 @@ def set_source_video(
     result = supabase.table('salespersons').update(
         {'source_video_url': video_url}
     ).eq('id', salesperson_id).execute()
-    return {'status': 'ok', 'salesperson_id': salesperson_id, 'video_url': video_url}
+    return {'status': 'ok', 'salesperson_id': salesperson_id, 'video_url': video_url, 'updated': result.data}
 
 if __name__ == '__main__':
     uvicorn.run('main:app', host='0.0.0.0', port=8000, reload=True)
