@@ -1,5 +1,6 @@
 from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from typing import Optional
 import uuid, os, asyncio, tempfile
@@ -45,7 +46,7 @@ async def generate_video(req: GenerateRequest, background_tasks: BackgroundTasks
     }).execute()
 
     background_tasks.add_task(_run_pipeline, job_id, req.vehicle_url,
-                               req.salesperson_id, dealership_id, req.page_html)
+                              req.salesperson_id, dealership_id, req.page_html)
     return {'job_id': job_id, 'status': 'queued'}
 
 @router.get('/status/{job_id}')
@@ -61,6 +62,19 @@ async def get_history(current_user=Depends(get_current_user)):
     resp = supabase.table('video_jobs').select('*').eq('user_id', user_id).order('created_at', desc=True).limit(20).execute()
     return resp.data or []
 
+@router.get('/download/{job_id}')
+async def download_video(job_id: str, current_user=Depends(get_current_user)):
+    user_id = current_user['sub']
+    resp = supabase.table('video_jobs').select('*').eq('id', job_id).single().execute()
+    if not resp.data:
+        raise HTTPException(404, 'Job not found')
+    job = resp.data
+    if job.get('user_id') != user_id:
+        raise HTTPException(403, 'Not authorized')
+    if job.get('status') != 'completed' or not job.get('output_url'):
+        raise HTTPException(400, 'Video not ready')
+    return RedirectResponse(url=job['output_url'], status_code=302)
+
 def _upd(job_id, status, msg):
     try:
         supabase.table('video_jobs').update({'status': status, 'status_message': msg}).eq('id', job_id).execute()
@@ -74,7 +88,6 @@ async def _run_pipeline(job_id, vehicle_url, salesperson_id, dealership_id, page
     try:
         def upd(s, m): _upd(job_id, s, m)
 
-        # STEP 1: Get salesperson info
         upd('rendering', 'Loading salesperson profile...')
         sp_resp = supabase.table('salespersons').select('*').eq('id', salesperson_id).single().execute()
         salesperson = sp_resp.data or {}
@@ -82,13 +95,11 @@ async def _run_pipeline(job_id, vehicle_url, salesperson_id, dealership_id, page
         voice_id = salesperson.get('heygen_voice_id') or HEYGEN_VOICE_ID
         avatar_group_id = salesperson.get('heygen_avatar_group_id') or HEYGEN_AVATAR_GROUP_ID
 
-        # Get avatar look ID
         look_id = salesperson.get('heygen_look_id') or get_look_id(avatar_group_id)
         if not look_id:
             raise ValueError('Could not find avatar look ID')
         print(f'[Pipeline] Look ID: {look_id}')
 
-        # STEP 2: Scrape vehicle listing
         upd('rendering', 'Scraping vehicle listing...')
         vehicle = await loop.run_in_executor(None, lambda: scrape_vehicle_page(vehicle_url, page_html))
         if not vehicle.get('photos') and not vehicle.get('video_url'):
@@ -100,13 +111,11 @@ async def _run_pipeline(job_id, vehicle_url, salesperson_id, dealership_id, page
         print(f'[Pipeline] Vehicle: {vehicle_name}')
         print(f'[Pipeline] Photos: {len(photos)}, Video URL: {vehicle_video_url}')
 
-        # Update vehicle name in DB
         try:
             supabase.table('video_jobs').update({'vehicle_name': vehicle_name}).eq('id', job_id).execute()
         except Exception:
             pass
 
-        # STEP 3: Generate script
         upd('rendering', 'Writing AI walkaround script...')
         script_data = await loop.run_in_executor(None, lambda: generate_walkaround_script(
             vehicle=vehicle,
@@ -118,14 +127,12 @@ async def _run_pipeline(job_id, vehicle_url, salesperson_id, dealership_id, page
         if not full_script:
             raise ValueError('Script generation failed')
 
-        # STEP 4: Generate HeyGen voice audio
         upd('rendering', 'Generating AI voice (this takes 30-45 min)...')
         audio_path, heygen_mp4_path = await loop.run_in_executor(
             None,
             lambda: generate_heygen_audio(full_script, look_id, voice_id, tmpdir)
         )
 
-        # STEP 5: Assemble final video
         upd('assembling', 'Assembling walkaround video...')
         final_path = await loop.run_in_executor(None, lambda: build_walkaround_video(
             vehicle=vehicle,
@@ -137,7 +144,6 @@ async def _run_pipeline(job_id, vehicle_url, salesperson_id, dealership_id, page
             tmpdir=tmpdir
         ))
 
-        # STEP 6: Upload to Supabase
         upd('uploading', 'Uploading video...')
         storage_path = f'videos/{job_id}_final.mp4'
         with open(final_path, 'rb') as f:
