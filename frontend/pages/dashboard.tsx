@@ -9,6 +9,7 @@ const STATUS_ICONS: any = {
   scripting: <Loader className='w-5 h-5 text-blue-400 animate-spin' />,
   rendering: <Loader className='w-5 h-5 text-purple-400 animate-spin' />,
   assembling: <Loader className='w-5 h-5 text-purple-400 animate-spin' />,
+  uploading: <Loader className='w-5 h-5 text-purple-400 animate-spin' />,
   completed: <CheckCircle className='w-5 h-5 text-green-400' />,
   failed: <XCircle className='w-5 h-5 text-red-400' />,
 };
@@ -37,6 +38,12 @@ export default function Dashboard() {
       setSalespersons(sps);
       setJobs(history);
       if (sps.length > 0) setSelectedSp(sps[0].id);
+      // Resume polling any in-progress jobs
+      const inProgress = history.find((j: any) => ['queued','scraping','scripting','rendering','assembling','uploading'].includes(j.status));
+      if (inProgress && !pollRef.current) {
+        setActiveJob(inProgress);
+        pollRef.current = setInterval(() => pollJob(inProgress.id), 8000);
+      }
     } catch(e) { router.push('/login'); }
   }
 
@@ -45,7 +52,6 @@ export default function Dashboard() {
     if (!vehicleUrl || !selectedSp) return;
     setGenerating(true); setError('');
     try {
-      // Use Vercel API route to fetch vehicle page HTML server-side (avoids CORS + bot detection)
       let pageHtml: string | undefined;
       try {
         const scrapeResp = await fetch('/api/scrape', {
@@ -58,7 +64,6 @@ export default function Dashboard() {
           pageHtml = scrapeData.html;
         }
       } catch(fetchErr) {
-        // If Vercel scrape fails, backend will try server-side
         console.warn('Vercel scrape failed, backend will retry:', fetchErr);
       }
 
@@ -78,21 +83,45 @@ export default function Dashboard() {
       setJobs(prev => prev.map(j => j.id === jobId ? status : j));
       if (status.status === 'completed' || status.status === 'failed') {
         clearInterval(pollRef.current);
+        pollRef.current = null;
         setActiveJob(null);
         loadData();
       }
     } catch(e) {}
   }
 
-  function handleDownload(jobId: string, vehicleName: string) {
+  async function handleDownload(jobId: string, vehicleName: string, outputUrl?: string) {
+    // If we already have the public URL, use it directly
+    if (outputUrl) {
+      const a = document.createElement('a');
+      a.href = outputUrl;
+      a.download = `${vehicleName || 'walkaround'}.mp4`;
+      a.target = '_blank';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      return;
+    }
+    // Otherwise fetch via authenticated download endpoint to get redirect URL
     const token = localStorage.getItem('token');
-    const url = `${process.env.NEXT_PUBLIC_API_URL}/video/download/${jobId}`;
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${vehicleName || 'walkaround'}.mp4`;
-    document.head.appendChild(a);
-    a.click();
-    document.head.removeChild(a);
+    try {
+      const resp = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/video/download/${jobId}`, {
+        headers: { 'Authorization': `Bearer ${token}` },
+        redirect: 'follow'
+      });
+      if (resp.ok || resp.redirected) {
+        const url = resp.url || `${process.env.NEXT_PUBLIC_API_URL}/video/download/${jobId}`;
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${vehicleName || 'walkaround'}.mp4`;
+        a.target = '_blank';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      }
+    } catch(e) {
+      console.error('Download failed:', e);
+    }
   }
 
   function logout() {
@@ -157,7 +186,7 @@ export default function Dashboard() {
             <Loader className='w-5 h-5 text-brand animate-spin flex-shrink-0' />
             <div>
               <p className='font-semibold text-brand'>Video generating...</p>
-              <p className='text-sm text-gray-400'>This takes 3-8 minutes. The page will update automatically.</p>
+              <p className='text-sm text-gray-400'>This takes 30-45 minutes for HeyGen to render. The page will update automatically.</p>
             </div>
           </div>
         )}
@@ -180,7 +209,7 @@ export default function Dashboard() {
                     {new Date(job.created_at).toLocaleDateString()}
                   </div>
                   {job.status === 'completed' && (
-                    <button onClick={() => handleDownload(job.id, job.vehicle_name)}
+                    <button onClick={() => handleDownload(job.id, job.vehicle_name, job.output_url)}
                       className='flex items-center gap-2 bg-green-900/50 border border-green-600 text-green-400 px-3 py-2 rounded-lg hover:bg-green-900 transition-colors text-sm font-medium flex-shrink-0'>
                       <Download className='w-4 h-4' />Download
                     </button>
