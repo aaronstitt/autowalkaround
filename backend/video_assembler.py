@@ -199,7 +199,7 @@ def _build_photo_clip(photo_paths, audio_path, audio_duration, output_path):
                 '-loop', '1', '-i', photo_paths[0],
                 '-i', audio_path,
                 '-c:v', 'libx264', '-preset', 'fast', '-crf', '26',
-                '-vf', 'scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,setsar=1',
+                '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1',
                 '-c:a', 'aac', '-b:a', '128k', '-shortest',
                 '-pix_fmt', 'yuv420p', '-movflags', '+faststart', output_path
             ]
@@ -287,7 +287,7 @@ def build_intro_tts_clip(intro_text, voice_id, look_id, tmpdir):
         cmd = [
             'ffmpeg', '-y', '-loop', '1', '-i', look_img_path, '-i', audio_path,
             '-c:v', 'libx264', '-preset', 'fast', '-crf', '26',
-            '-vf', 'scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,setsar=1',
+            '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1',
             '-c:a', 'aac', '-b:a', '128k', '-shortest',
             '-pix_fmt', 'yuv420p', '-movflags', '+faststart', intro_clip_path
         ]
@@ -350,7 +350,7 @@ def build_vehicle_walkaround_video(vehicle_photos, vehicle_video_url, segments, 
             subprocess.run([
                 'ffmpeg', '-y', '-i', lv_path, '-t', '12',
                 '-c:v', 'libx264', '-preset', 'fast', '-crf', '28', '-an',
-                '-vf', 'scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,setsar=1',
+                '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1',
                 lv_trim
             ], capture_output=True, timeout=60)
             if os.path.exists(lv_trim) and os.path.getsize(lv_trim) > 10000:
@@ -401,7 +401,7 @@ def _download_file(url, dest_path):
     print('[Download]', dest_path, '(' + str(os.path.getsize(dest_path)) + ' bytes)')
 
 
-# ── Legacy shims ──────────────────────────────────────────────────────────────
+# ââ Legacy shims ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
 def get_avatar_source_video_url(avatar_group_id):
     return None
@@ -470,7 +470,7 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
                     res = subprocess.run([
                         'ffmpeg', '-y', '-loop', '1', '-i', last_photo, '-i', outro_audio,
                         '-c:v', 'libx264', '-preset', 'fast', '-crf', '26',
-                        '-vf', 'scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,setsar=1',
+                        '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1',
                         '-c:a', 'aac', '-b:a', '128k', '-shortest',
                         '-pix_fmt', 'yuv420p', '-movflags', '+faststart', outro_clip
                     ], capture_output=True, timeout=60)
