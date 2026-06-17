@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-import uvicorn
+import uvicorn, os, requests
 from auth import router as auth_router
 from video import router as video_router
 from onboarding import router as onboarding_router
@@ -21,6 +21,18 @@ app.include_router(onboarding_router, prefix='/onboarding', tags=['onboarding'])
 
 @app.get('/health')
 def health(): return {'status': 'ok'}
+
+@app.get('/debug/looks')
+def debug_looks():
+    """Temporary: list all looks for Aaron's avatar group with IDs and names."""
+    key = os.getenv('HEYGEN_API_KEY', '')
+    group_id = os.getenv('HEYGEN_AVATAR_GROUP_ID', '202a882fdd924622bc00d1eca0bf00cd')
+    r = requests.get(
+        f'https://api.heygen.com/v3/avatars/looks?ownership=private&group_id={group_id}',
+        headers={'x-api-key': key, 'Content-Type': 'application/json'},
+        timeout=30
+    )
+    return r.json()
 
 if __name__ == '__main__':
     uvicorn.run('main:app', host='0.0.0.0', port=8000, reload=True)
