@@ -9,7 +9,11 @@ from scraper import scrape_vehicle_page
 from script_generator import generate_walkaround_script
 from video_assembler import (
     get_look_id,
+    get_avatar_source_video_url,
     generate_heygen_audio,
+    generate_tts_audio,
+    upload_audio_to_heygen,
+    run_video_translation,
     build_walkaround_video,
     _download_file
 )
@@ -17,7 +21,6 @@ from db import supabase
 
 router = APIRouter()
 SUPABASE_BUCKET = os.getenv('SUPABASE_STORAGE_BUCKET', 'videos')
-PLAN_LIMITS = {'free': 999999, 'starter': 30, 'growth': 90, 'unlimited': 999999}
 
 HEYGEN_VOICE_ID = os.getenv('HEYGEN_VOICE_ID', '6ee20575cb9f4a7e9dc19096a958eab1')
 HEYGEN_AVATAR_GROUP_ID = os.getenv('HEYGEN_AVATAR_GROUP_ID', '202a882fdd924622bc00d1eca0bf00cd')
@@ -94,10 +97,28 @@ async def _run_pipeline(job_id, vehicle_url, salesperson_id, dealership_id, page
         salesperson_name = salesperson.get('name', 'Aaron')
         voice_id = salesperson.get('heygen_voice_id') or HEYGEN_VOICE_ID
         avatar_group_id = salesperson.get('heygen_avatar_group_id') or HEYGEN_AVATAR_GROUP_ID
+        source_video_url = salesperson.get('source_video_url')
+
+        print(f'[Pipeline] Salesperson: {salesperson_name}, source_video_url: {source_video_url}')
+
+        # If no source video stored yet, try to retrieve from HeyGen
+        if not source_video_url:
+            upd('rendering', 'Looking up walkaround source video from HeyGen...')
+            source_video_url = await loop.run_in_executor(
+                None, lambda: get_avatar_source_video_url(avatar_group_id)
+            )
+            if source_video_url:
+                print(f'[Pipeline] Found source video: {source_video_url[:80]}')
+                # Store it for future use
+                try:
+                    supabase.table('salespersons').update({'source_video_url': source_video_url}).eq('id', salesperson_id).execute()
+                    print(f'[Pipeline] Stored source_video_url in DB')
+                except Exception as e:
+                    print(f'[Pipeline] Could not store source_video_url: {e}')
+            else:
+                print('[Pipeline] WARNING: Could not retrieve source video URL from HeyGen automatically')
 
         look_id = salesperson.get('heygen_look_id') or get_look_id(avatar_group_id)
-        if not look_id:
-            raise ValueError('Could not find avatar look ID')
         print(f'[Pipeline] Look ID: {look_id}')
 
         upd('rendering', 'Scraping vehicle listing...')
@@ -108,8 +129,7 @@ async def _run_pipeline(job_id, vehicle_url, salesperson_id, dealership_id, page
         vehicle_name = vehicle.get('name', 'Vehicle')
         photos = vehicle.get('photos', [])
         vehicle_video_url = vehicle.get('video_url')
-        print(f'[Pipeline] Vehicle: {vehicle_name}')
-        print(f'[Pipeline] Photos: {len(photos)}, Video URL: {vehicle_video_url}')
+        print(f'[Pipeline] Vehicle: {vehicle_name}, Photos: {len(photos)}')
 
         try:
             supabase.table('video_jobs').update({'vehicle_name': vehicle_name}).eq('id', job_id).execute()
@@ -127,18 +147,33 @@ async def _run_pipeline(job_id, vehicle_url, salesperson_id, dealership_id, page
         if not full_script:
             raise ValueError('Script generation failed')
 
-        upd('rendering', 'Generating AI avatar video with transparent background (30-45 min)...')
-        heygen_result = await loop.run_in_executor(
-            None,
-            lambda: generate_heygen_audio(full_script, look_id, voice_id, tmpdir)
+        upd('rendering', 'Generating AI voice for new script...')
+        audio_path, audio_url = await loop.run_in_executor(
+            None, lambda: generate_tts_audio(full_script, voice_id, tmpdir)
         )
-        heygen_path, heygen_fmt = heygen_result
 
-        upd('assembling', 'Compositing Aaron over vehicle photos...')
+        # Upload audio to HeyGen for use in translation
+        audio_asset_id = None
+        try:
+            audio_asset_id = await loop.run_in_executor(
+                None, lambda: upload_audio_to_heygen(audio_path)
+            )
+        except Exception as e:
+            print(f'[Pipeline] Audio upload failed, will use URL: {e}')
+
+        heygen_result = {
+            'audio_path': audio_path,
+            'audio_url': audio_url,
+            'audio_asset_id': audio_asset_id,
+            'source_video_url': source_video_url,
+            'look_id': look_id
+        }
+
+        upd('assembling', 'Applying new script to walkaround video with lip sync (30-45 min)...')
         final_path = await loop.run_in_executor(None, lambda: build_walkaround_video(
             vehicle=vehicle,
             script_segments=script_data.get('segments', []),
-            heygen_audio_path=heygen_path,
+            heygen_audio_path=audio_path,
             heygen_result=heygen_result,
             vehicle_photos=photos,
             vehicle_video_url=vehicle_video_url,
