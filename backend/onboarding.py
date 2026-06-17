@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
 from pydantic import BaseModel
+from typing import Optional
 from auth import get_current_user
 from db import supabase
 import os, uuid, requests
@@ -27,6 +28,23 @@ async def add_salesperson(req: AddSalespersonRequest, current_user: dict = Depen
         'lot_background_url': req.lot_background_url
     }).execute()
     return result.data[0]
+
+class UpdateSalespersonRequest(BaseModel):
+    source_video_url: Optional[str] = None
+    lot_background_url: Optional[str] = None
+    heygen_voice_id: Optional[str] = None
+
+@router.patch('/salespersons/{sp_id}')
+async def update_salesperson(sp_id: str, req: UpdateSalespersonRequest, current_user: dict = Depends(get_current_user)):
+    updates = {k: v for k, v in req.dict().items() if v is not None}
+    if not updates:
+        return {'ok': True}
+    # Verify ownership
+    existing = supabase.table('salespersons').select('id').eq('id', sp_id).eq('dealership_id', current_user['dealership_id']).execute()
+    if not existing.data:
+        raise HTTPException(status_code=404, detail='Salesperson not found')
+    result = supabase.table('salespersons').update(updates).eq('id', sp_id).execute()
+    return result.data[0] if result.data else {'ok': True}
 
 @router.delete('/salespersons/{sp_id}')
 async def remove_salesperson(sp_id: str, current_user: dict = Depends(get_current_user)):
