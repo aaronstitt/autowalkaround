@@ -1,22 +1,18 @@
-import os, requests, time, subprocess, shutil, math
+import os, requests, time, json
 
 HEADERS = {'User-Agent': 'Mozilla/5.0'}
 HEYGEN_BASE = 'https://api.heygen.com'
 HEYGEN_POLL_INTERVAL = 15
-HEYGEN_POLL_MAX = 300
+HEYGEN_POLL_MAX = 300  # 75 minutes max
 
-WALKAROUND_MOTION_PROMPT = (
-    "The person is performing a car dealership vehicle walkaround video in selfie mode. "
-    "They hold the camera phone in front of themselves pointing at their own face (selfie style). "
-    "They physically walk around the entire perimeter of the vehicle, moving continuously. "
-    "With their free hand they gesture and point to different parts of the car. "
-    "Full body visible. Energetic, enthusiastic used car salesperson body language throughout."
-)
+def heygen_headers():
+    return {'x-api-key': os.getenv('HEYGEN_API_KEY'), 'Content-Type': 'application/json'}
 
 def get_look_id(avatar_group_id):
+    """Get best look ID from avatar group - used as fallback only."""
     try:
         url = HEYGEN_BASE + '/v3/avatars/looks?ownership=private&group_id=' + avatar_group_id
-        r = requests.get(url, headers={'x-api-key': os.getenv('HEYGEN_API_KEY'), 'Content-Type': 'application/json'}, timeout=30)
+        r = requests.get(url, headers=heygen_headers(), timeout=30)
         if r.status_code == 200:
             data = r.json().get('data', [])
             looks = data if isinstance(data, list) else data.get('looks', [])
@@ -31,63 +27,153 @@ def get_look_id(avatar_group_id):
         print(f'[get_look_id] error: {e}')
     return None
 
-def heygen_headers():
-    return {'x-api-key': os.getenv('HEYGEN_API_KEY'), 'Content-Type': 'application/json'}
+def get_avatar_source_video_url(avatar_group_id):
+    """
+    Retrieve the source training video URL for an avatar group.
+    This is the original walkaround video the salesperson recorded.
+    """
+    try:
+        # Try v3 looks API with full details
+        url = HEYGEN_BASE + '/v3/avatars/looks?ownership=private&group_id=' + avatar_group_id
+        r = requests.get(url, headers=heygen_headers(), timeout=30)
+        print(f'[Avatar] looks API: {r.status_code}')
+        if r.status_code == 200:
+            data = r.json()
+            print(f'[Avatar] looks data keys: {list(data.keys()) if isinstance(data, dict) else type(data)}')
+            looks = data.get('data', [])
+            if isinstance(looks, dict):
+                looks = looks.get('looks', [])
+            print(f'[Avatar] found {len(looks)} looks')
+            for look in looks:
+                print(f'[Avatar] look keys: {list(look.keys())}')
+                # Check for source_video, video_url, source_url, original_video_url etc
+                for key in ['source_video_url', 'video_url', 'source_url', 'original_url', 'training_video_url', 'raw_video_url']:
+                    if look.get(key):
+                        print(f'[Avatar] Found source video at key={key}: {look[key][:80]}')
+                        return look[key]
+    except Exception as e:
+        print(f'[Avatar] get_source error: {e}')
+
+    # Try avatar group detail endpoint
+    try:
+        r2 = requests.get(HEYGEN_BASE + '/v2/avatar_group/' + avatar_group_id, headers=heygen_headers(), timeout=30)
+        print(f'[Avatar] group detail: {r2.status_code} {r2.text[:200]}')
+    except Exception as e:
+        print(f'[Avatar] group detail error: {e}')
+
+    return None
+
+def generate_tts_audio(script_text, voice_id, tmpdir):
+    """Generate TTS audio from script using HeyGen TTS API."""
+    print('[TTS] Generating audio...')
+    payload = {
+        'text': script_text,
+        'voice_id': voice_id,
+        'speed': 1.0
+    }
+    r = requests.post(HEYGEN_BASE + '/v1/text_to_speech', headers=heygen_headers(), json=payload, timeout=60)
+    if r.status_code != 200:
+        raise RuntimeError(f'TTS failed: {r.status_code} {r.text[:200]}')
+    
+    audio_url = r.json().get('data', {}).get('audio_url')
+    if not audio_url:
+        raise RuntimeError(f'TTS no audio_url: {r.text[:200]}')
+    
+    audio_path = os.path.join(tmpdir, 'script_audio.mp3')
+    _download_file(audio_url, audio_path)
+    print(f'[TTS] Downloaded audio: {audio_path}')
+    return audio_path, audio_url
+
+def upload_audio_to_heygen(audio_path):
+    """Upload audio file to HeyGen assets and return asset_id."""
+    print('[Upload] Uploading audio to HeyGen...')
+    with open(audio_path, 'rb') as f:
+        r = requests.post(
+            HEYGEN_BASE + '/v1/asset',
+            headers={'x-api-key': os.getenv('HEYGEN_API_KEY')},
+            files={'file': ('audio.mp3', f, 'audio/mpeg')},
+            timeout=120
+        )
+    if r.status_code != 200:
+        raise RuntimeError(f'Asset upload failed: {r.status_code} {r.text[:200]}')
+    asset_id = r.json().get('data', {}).get('id') or r.json().get('data', {}).get('asset_id')
+    print(f'[Upload] Asset ID: {asset_id}')
+    return asset_id
 
 def generate_heygen_audio(script_text, avatar_look_id, voice_id, tmpdir):
-    """Generate walkaround video via HeyGen Avatar V with transparent background (webm)."""
-    print('[HeyGen] Generating walkaround video with transparent background...')
+    """
+    Main generation function.
+    Returns (audio_path, result) where result contains source video info.
+    """
+    # Generate TTS audio of the new script
+    audio_path, audio_url = generate_tts_audio(script_text, voice_id, tmpdir)
+    return audio_path, {'audio_path': audio_path, 'audio_url': audio_url, 'look_id': avatar_look_id}
+
+def run_video_translation(source_video_url, audio_url, audio_asset_id, tmpdir):
+    """
+    Use HeyGen Video Translation API to replace audio in source video with lip sync.
+    source_video_url: URL of Aaron's original walkaround recording
+    audio_url: URL of the new TTS audio with the vehicle script
+    """
+    print(f'[VideoTranslation] Starting with source: {source_video_url[:80]}...')
+    print(f'[VideoTranslation] Audio: {(audio_url or audio_asset_id or "")[:80]}')
 
     payload = {
-        'type': 'avatar',
-        'avatar_id': avatar_look_id,
-        'voice_id': voice_id,
-        'script': script_text,
-        'aspect_ratio': '9:16',
-        'resolution': '720p',
-        'output_format': 'webm',
-        'remove_background': True,
-        'motion_prompt': WALKAROUND_MOTION_PROMPT,
-        'engine': {'type': 'avatar_v'}
+        'video': {'type': 'url', 'url': source_video_url},
+        'output_languages': ['English'],
+        'title': 'AutoWalkaround Vehicle Video',
+        'mode': 'precision',
+        'translate_audio_only': False,
+        'enable_dynamic_duration': True,
+        'disable_music_track': True,
+        'enable_speech_enhancement': True,
+        'speaker_num': 1,
     }
 
-    r = requests.post(HEYGEN_BASE + '/v3/videos', headers=heygen_headers(), json=payload, timeout=60)
+    # Add audio track
+    if audio_asset_id:
+        payload['audio'] = {'type': 'asset_id', 'asset_id': audio_asset_id}
+    elif audio_url:
+        payload['audio'] = {'type': 'url', 'url': audio_url}
+
+    r = requests.post(HEYGEN_BASE + '/v3/video-translations', headers=heygen_headers(), json=payload, timeout=60)
     if r.status_code != 200:
-        print(f'[HeyGen] webm failed ({r.status_code}), falling back to mp4: {r.text[:200]}')
-        payload['output_format'] = 'mp4'
-        payload.pop('remove_background', None)
-        r = requests.post(HEYGEN_BASE + '/v3/videos', headers=heygen_headers(), json=payload, timeout=60)
-        if r.status_code != 200:
-            raise RuntimeError(f'HeyGen create failed: {r.status_code} {r.text}')
+        raise RuntimeError(f'VideoTranslation failed: {r.status_code} {r.text[:300]}')
 
-    video_id = r.json()['data']['video_id']
-    output_fmt = payload['output_format']
-    print(f'[HeyGen] Video ID: {video_id} format={output_fmt} - polling every {HEYGEN_POLL_INTERVAL}s...')
+    translation_ids = r.json().get('data', {}).get('video_translation_ids', [])
+    if not translation_ids:
+        raise RuntimeError(f'No translation IDs returned: {r.text[:200]}')
+    
+    translation_id = translation_ids[0]
+    print(f'[VideoTranslation] ID: {translation_id} - polling...')
 
+    # Poll for completion
     for i in range(HEYGEN_POLL_MAX):
         time.sleep(HEYGEN_POLL_INTERVAL)
         try:
-            sr = requests.get(HEYGEN_BASE + '/v3/videos/' + video_id, headers=heygen_headers(), timeout=30)
+            sr = requests.get(
+                HEYGEN_BASE + '/v3/video-translations/' + translation_id,
+                headers=heygen_headers(), timeout=30
+            )
             vdata = sr.json().get('data', {})
             status = vdata.get('status', 'unknown')
-            print(f'[HeyGen] Poll {i+1}: {status}')
-            if status == 'completed':
-                video_url = vdata.get('video_url')
+            print(f'[VideoTranslation] Poll {i+1}: {status}')
+            if status in ('completed', 'success'):
+                video_url = vdata.get('video_url') or vdata.get('output_video_url')
                 if not video_url:
-                    raise RuntimeError('HeyGen completed but no video_url')
-                ext = 'webm' if output_fmt == 'webm' else 'mp4'
-                heygen_path = os.path.join(tmpdir, f'heygen_avatar.{ext}')
-                _download_file(video_url, heygen_path)
-                print(f'[HeyGen] Downloaded: {heygen_path}')
-                return heygen_path, output_fmt
-            elif status == 'failed':
-                raise RuntimeError(f'HeyGen failed: {vdata.get("failure_message", "unknown")}')
+                    raise RuntimeError(f'Completed but no video_url: {json.dumps(vdata)[:200]}')
+                out_path = os.path.join(tmpdir, 'translated_final.mp4')
+                _download_file(video_url, out_path)
+                print(f'[VideoTranslation] Downloaded: {out_path}')
+                return out_path
+            elif status in ('failed', 'error'):
+                raise RuntimeError(f'Translation failed: {vdata.get("error_message", json.dumps(vdata)[:200])}')
         except RuntimeError:
             raise
         except Exception as e:
-            print(f'[HeyGen] Poll {i+1} error: {e}')
+            print(f'[VideoTranslation] Poll {i+1} error: {e}')
 
-    raise RuntimeError(f'HeyGen timed out after {HEYGEN_POLL_MAX * HEYGEN_POLL_INTERVAL // 60} min')
+    raise RuntimeError('VideoTranslation timed out')
 
 def _download_file(url, dest_path):
     r = requests.get(url, headers=HEADERS, stream=True, timeout=300)
@@ -97,165 +183,23 @@ def _download_file(url, dest_path):
             f.write(chunk)
     print(f'[Download] {dest_path} ({os.path.getsize(dest_path)} bytes)')
 
-def _get_video_duration(path):
-    """Get video duration in seconds using ffprobe."""
-    try:
-        result = subprocess.run(
-            ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', path],
-            capture_output=True, text=True, timeout=30
-        )
-        import json
-        data = json.loads(result.stdout)
-        return float(data['format']['duration'])
-    except Exception as e:
-        print(f'[ffprobe] error getting duration: {e}')
-        return 120.0
-
-def _download_photos(photo_urls, tmpdir, max_photos=12):
-    """Download vehicle photos for background."""
-    photos = []
-    photo_dir = os.path.join(tmpdir, 'photos')
-    os.makedirs(photo_dir, exist_ok=True)
-    for i, url in enumerate(photo_urls[:max_photos]):
-        try:
-            dest = os.path.join(photo_dir, f'photo_{i:02d}.jpg')
-            r = requests.get(url, headers=HEADERS, timeout=30, stream=True)
-            r.raise_for_status()
-            with open(dest, 'wb') as f:
-                for chunk in r.iter_content(65536):
-                    f.write(chunk)
-            photos.append(dest)
-            print(f'[Photos] Downloaded {i+1}: {dest}')
-        except Exception as e:
-            print(f'[Photos] Failed photo {i}: {e}')
-    return photos
-
 def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
                            heygen_result, vehicle_photos, vehicle_video_url, tmpdir):
     """
-    Composite Aaron (transparent webm) over animated vehicle photos.
-    heygen_result is (path, format) tuple from generate_heygen_audio.
+    Build final walkaround video using Video Translation:
+    - source = Aaron's original walkaround recording (stored in salespersons.source_video_url)
+    - audio = new TTS of the vehicle script
+    - HeyGen replaces audio and re-syncs lips to new script
     """
-    if isinstance(heygen_result, tuple):
-        heygen_path, output_fmt = heygen_result
-    else:
-        heygen_path = heygen_result
-        output_fmt = 'mp4'
+    source_video_url = heygen_result.get('source_video_url') if isinstance(heygen_result, dict) else None
+    audio_url = heygen_result.get('audio_url') if isinstance(heygen_result, dict) else None
+    audio_asset_id = heygen_result.get('audio_asset_id') if isinstance(heygen_result, dict) else None
 
-    # If not webm (transparent), just return mp4 as-is (fallback)
-    if output_fmt != 'webm':
-        print('[Build] No transparency available - returning HeyGen mp4 directly')
-        return heygen_path
+    if not source_video_url:
+        raise RuntimeError(
+            'No source_video_url found. Please add your walkaround video URL to the salesperson profile '
+            'in Supabase (salespersons.source_video_url column) via the dashboard /admin/salespersons endpoint.'
+        )
 
-    print('[Build] Compositing Aaron over vehicle photos...')
-
-    # Get Aaron video duration
-    duration = _get_video_duration(heygen_path)
-    print(f'[Build] Aaron video duration: {duration:.1f}s')
-
-    # Download vehicle photos
-    photos = _download_photos(vehicle_photos, tmpdir, max_photos=12)
-    if not photos:
-        print('[Build] No photos available - returning HeyGen video directly')
-        return heygen_path
-
-    # Calculate seconds per photo
-    secs_per_photo = duration / len(photos)
-    secs_per_photo = max(secs_per_photo, 4.0)  # minimum 4s per photo
-
-    # Output dimensions: 9:16 at 720p
-    out_w, out_h = 720, 1280
-
-    # Build background slideshow using concat
-    # Each photo gets a slow ken-burns zoom effect
-    photo_clips = []
-    for i, photo in enumerate(photos):
-        clip_path = os.path.join(tmpdir, f'bg_clip_{i:02d}.mp4')
-        duration_this = secs_per_photo
-        # Alternate zoom direction for variety
-        if i % 2 == 0:
-            vf = f"scale=iw*2:ih*2,zoompan=z='min(zoom+0.0005,1.3)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={int(duration_this*25)}:s={out_w}x{out_h}:fps=25,setsar=1"
-        else:
-            vf = f"scale=iw*2:ih*2,zoompan=z='if(lte(zoom,1.0),1.3,max(1.0,zoom-0.0005))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={int(duration_this*25)}:s={out_w}x{out_h}:fps=25,setsar=1"
-        cmd = [
-            'ffmpeg', '-y', '-loop', '1', '-i', photo,
-            '-vf', vf,
-            '-t', str(duration_this),
-            '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
-            '-r', '25', clip_path
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        if result.returncode != 0:
-            print(f'[Build] zoompan failed for photo {i}, using simple scale: {result.stderr[-300:]}')
-            # Fallback: simple scale without zoompan
-            vf_simple = f"scale={out_w}:{out_h}:force_original_aspect_ratio=increase,crop={out_w}:{out_h},setsar=1"
-            cmd2 = [
-                'ffmpeg', '-y', '-loop', '1', '-i', photo,
-                '-vf', vf_simple,
-                '-t', str(duration_this),
-                '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
-                '-r', '25', clip_path
-            ]
-            result2 = subprocess.run(cmd2, capture_output=True, text=True, timeout=60)
-            if result2.returncode != 0:
-                print(f'[Build] simple scale also failed for photo {i}')
-                continue
-        photo_clips.append(clip_path)
-
-    if not photo_clips:
-        print('[Build] No background clips created - returning HeyGen webm as-is')
-        return heygen_path
-
-    # Concatenate background clips
-    bg_list_path = os.path.join(tmpdir, 'bg_list.txt')
-    with open(bg_list_path, 'w') as f:
-        for clip in photo_clips:
-            f.write(f"file '{clip}'\n")
-
-    bg_full_path = os.path.join(tmpdir, 'bg_full.mp4')
-    cmd_concat = [
-        'ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', bg_list_path,
-        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', bg_full_path
-    ]
-    result = subprocess.run(cmd_concat, capture_output=True, text=True, timeout=120)
-    if result.returncode != 0:
-        print(f'[Build] concat failed: {result.stderr[-300:]}')
-        return heygen_path
-
-    # Trim background to exact Aaron video duration
-    bg_trimmed_path = os.path.join(tmpdir, 'bg_trimmed.mp4')
-    cmd_trim = [
-        'ffmpeg', '-y', '-i', bg_full_path,
-        '-t', str(duration),
-        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', bg_trimmed_path
-    ]
-    subprocess.run(cmd_trim, capture_output=True, text=True, timeout=60)
-
-    bg_path = bg_trimmed_path if os.path.exists(bg_trimmed_path) else bg_full_path
-
-    # Composite: overlay Aaron (webm with alpha) on background
-    # Aaron positioned: centered horizontally, lower 80% of frame, ~70% width
-    aaron_scale_w = int(out_w * 0.85)
-    overlay_x = (out_w - aaron_scale_w) // 2
-    overlay_y = int(out_h * 0.15)  # Aaron fills from 15% down
-
-    final_path = os.path.join(tmpdir, 'final_composite.mp4')
-    cmd_overlay = [
-        'ffmpeg', '-y',
-        '-i', bg_path,
-        '-i', heygen_path,
-        '-filter_complex',
-        f'[1:v]scale={aaron_scale_w}:-1[aaron];[0:v][aaron]overlay={overlay_x}:{overlay_y}:shortest=1[v]',
-        '-map', '[v]',
-        '-map', '1:a',
-        '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
-        '-c:a', 'aac', '-b:a', '128k',
-        '-r', '25', final_path
-    ]
-    result = subprocess.run(cmd_overlay, capture_output=True, text=True, timeout=300)
-    if result.returncode != 0:
-        print(f'[Build] overlay failed: {result.stderr[-500:]}')
-        return heygen_path
-
-    print(f'[Build] Composite complete: {final_path} ({os.path.getsize(final_path)} bytes)')
+    final_path = run_video_translation(source_video_url, audio_url, audio_asset_id, tmpdir)
     return final_path
