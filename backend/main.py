@@ -20,6 +20,40 @@ app.include_router(auth_router, prefix='/auth', tags=['auth'])
 app.include_router(video_router, prefix='/video', tags=['video'])
 app.include_router(onboarding_router, prefix='/onboarding', tags=['onboarding'])
 
+def run_migrations():
+    """Run DB migrations on startup."""
+    try:
+        supa_url = os.getenv('SUPABASE_URL', '')
+        supa_key = os.getenv('SUPABASE_SERVICE_KEY', '')
+        if not supa_url or not supa_key:
+            print('[Migration] Missing SUPABASE_URL or SUPABASE_SERVICE_KEY')
+            return
+        # Add source_video_url column if not exists
+        sql = "ALTER TABLE salespersons ADD COLUMN IF NOT EXISTS source_video_url TEXT;"
+        r = requests.post(
+            supa_url.rstrip('/') + '/rest/v1/rpc/exec_migration',
+            headers={
+                'apikey': supa_key,
+                'Authorization': f'Bearer {supa_key}',
+                'Content-Type': 'application/json'
+            },
+            json={'sql': sql},
+            timeout=10
+        )
+        print(f'[Migration] exec_migration: {r.status_code} {r.text[:100]}')
+    except Exception as e:
+        print(f'[Migration] error: {e}')
+    # Also try direct column check via select
+    try:
+        result = supabase.table('salespersons').select('source_video_url').limit(1).execute()
+        print('[Migration] source_video_url column exists - OK')
+    except Exception as e:
+        print(f'[Migration] source_video_url column check failed: {e}')
+
+@app.on_event('startup')
+async def startup_event():
+    run_migrations()
+
 @app.get('/health')
 def health(): return {'status': 'ok'}
 
