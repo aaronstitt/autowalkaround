@@ -4,113 +4,163 @@ import json
 
 client = openai.OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 
-# Fixed intro/outro that stays the same every time per requirements
-# Only the vehicle-specific details (name, price) are inserted
-FIXED_INTRO_TEMPLATE = (
-    "Hey what is going on guys, {name} here with Immaculate Used Cars. "
-    "I am here today to walk you around this beautiful {year} {make} {model} {trim}. "
-    "Let me show you what she's got."
-)
+# ──────────────────────────────────────────────
+# SEGMENTED walkaround script - each segment maps to a camera position
+# Order mirrors walkaround v4.mov:
+#   intro     -> selfie face-cam: salesperson intro
+#   front     -> camera faces vehicle front
+#   driver_side -> walking to driver side
+#   rear      -> at rear of vehicle
+#   pass_side -> passenger side
+#   interior  -> inside vehicle
+#   outro     -> closing, price, CTA
+# ──────────────────────────────────────────────
 
-FIXED_OUTRO_TEMPLATE = (
-    "Guys that is it for this {year} {make} {model} {trim}. "
-    "It is priced at {price}. "
-    "If you are interested give us a call or come on in and we will get you taken care of. "
-    "I am {name} with Immaculate Used Cars - come see us!"
-)
+SYSTEM_PROMPT = """You are an expert automotive walkaround video scriptwriter.
+You write scripts for a salesperson physically walking a phone camera around a vehicle.
 
-SYSTEM_PROMPT = '''You are an expert automotive salesperson script writer.
-Write a natural, conversational walkaround video script as if the salesperson is physically walking around the vehicle with the customer.
+THE VIDEO STRUCTURE - script must match this exactly:
+- INTRO: Salesperson faces camera, selfie mode, introduces himself and vehicle (15-20 seconds spoken)
+- FRONT: Camera now faces vehicle front - salesperson talks about front-end features
+- DRIVER_SIDE: Walking to driver side - driver-side features
+- REAR: At the rear - rear features including backup camera etc
+- PASS_SIDE: Passenger side - wheels, moldings, exterior
+- INTERIOR: Camera inside vehicle - all interior features
+- OUTRO: Quick wrap-up, price, call to action
 
-CRITICAL RULES:
-1. Use ONLY the Highlighted Features provided - do not invent or add any features
-2. Mention features in this order: exterior features first, then interior features
-3. Write as if physically pointing at each feature while standing at the car
-4. Sound like a real person talking, not reading from a list
-5. Voice inflection should vary - use enthusiasm for great features, be informative for specs
-6. Do NOT include intro or outro - those are handled separately
-7. Keep total between 150-220 words for the feature walkthrough section only
+STYLE RULES:
+1. Sound like a REAL enthusiastic person. Natural speech, not robotic.
+2. Use contractions: you're, it's, we've got, let's, she's, that's
+3. Add verbal transitions: Now check this out, Come around here, Look at this, Over here we've got
+4. Vary pace and energy. Short punchy sentences for exciting features.
+5. Use enthusiasm: This is awesome, I love this, Check that out, This one is huge
+6. ONLY mention features matching the camera position segment
+7. ONLY use features from the Highlighted Features list - never invent features
 
-Return ONLY valid JSON with these keys:
-exterior_script: talking about exterior highlighted features while walking the outside
-interior_script: talking about interior highlighted features while showing inside
-full_script: exterior_script + interior_script combined
-word_count: total word count'''
+Return ONLY valid JSON with exactly these keys:
+intro, front, driver_side, rear, pass_side, interior, outro, full_script, word_count"""
 
-def generate_walkaround_script(vehicle, salesperson_name, dealer_name=''):
+def generate_walkaround_script(vehicle, salesperson_name, dealer_name='Immaculate Used Cars'):
     year = vehicle.get('year', '')
     make = vehicle.get('make', '')
     model = vehicle.get('model', '')
-    trim = vehicle.get('name', '').replace(str(year), '').replace(str(make), '').replace(str(model), '').strip()
+    trim_raw = vehicle.get('name', '')
+    trim = trim_raw
+    for part in [str(year), str(make), str(model)]:
+        trim = trim.replace(part, '').strip()
+    trim = trim.strip(' -\u2013')
     price = vehicle.get('price', '')
+    color = vehicle.get('color', '')
     highlighted = vehicle.get('highlighted_features', [])
-    exterior = vehicle.get('exterior_features', [])
-    interior = vehicle.get('interior_features', [])
 
-    # Build fixed intro and outro
-    intro_script = FIXED_INTRO_TEMPLATE.format(
-        name=salesperson_name,
-        year=year, make=make, model=model,
-        trim=trim or '',
-    ).strip()
+    # Categorize features by camera position
+    front_kw = ['headlight', 'fog light', 'approach light', 'bumper', 'hood', 'grille', 'front fog', 'delay-off']
+    rear_kw = ['camera', 'backup', 'rear window wiper', 'liftgate', 'spoiler', 'parkview', 'rear window', 'back-up']
+    driver_kw = ['mirror', 'keyless entry', 'perimeter', 'remote keyless', 'auto-dimming']
+    side_kw = ['wheel', 'alloy', 'molding', 'belt molding', 'rack', 'roof rack', 'crossbar', 'touring suspension']
+    interior_kw = ['seat', 'leather', 'audio', 'screen', 'display', 'climate', 'air conditioning',
+                   'wireless', 'navigation', 'steering wheel', 'folding', 'cargo', 'armrest',
+                   'heated', 'sunroof', 'moonroof', 'touchscreen', 'phone', 'connectivity',
+                   'carplay', 'android', 'satellite', 'speaker', 'tachometer', 'temperature',
+                   'dimming rearview', 'stow', 'bucket seat', '3rd row', 'split fold',
+                   'audio control', 'vanity', 'reading light', 'overhead', 'trip computer']
 
-    outro_script = FIXED_OUTRO_TEMPLATE.format(
-        name=salesperson_name,
-        year=year, make=make, model=model,
-        trim=trim or '',
-        price=('$' + str(price)) if price else 'a great price',
-    ).strip()
+    front_features, rear_features, driver_features = [], [], []
+    side_features, interior_feat, unassigned = [], [], []
 
-    # Only use highlighted features for the main script content
-    # Use all highlighted if categorization is sparse
-    if len(exterior) + len(interior) < 3:
-        exterior = highlighted[:int(len(highlighted) * 0.6)]
-        interior = highlighted[int(len(highlighted) * 0.6):]
+    for f in highlighted:
+        fl = f.lower()
+        if any(k in fl for k in interior_kw):
+            interior_feat.append(f)
+        elif any(k in fl for k in rear_kw):
+            rear_features.append(f)
+        elif any(k in fl for k in front_kw):
+            front_features.append(f)
+        elif any(k in fl for k in driver_kw):
+            driver_features.append(f)
+        elif any(k in fl for k in side_kw):
+            side_features.append(f)
+        else:
+            unassigned.append(f)
 
-    ext_list = chr(10).join('- ' + f for f in exterior)
-    int_list = chr(10).join('- ' + f for f in interior)
-    all_features = chr(10).join('- ' + f for f in highlighted)
+    # Distribute unassigned features evenly across segments
+    buckets = [front_features, driver_features, rear_features, side_features]
+    for i, f in enumerate(unassigned):
+        buckets[i % 4].append(f)
+
+    color_str = (' in ' + color) if color else ''
+
+    def feat_list(lst):
+        return '\n'.join('- ' + f for f in lst) if lst else '- (general presentation of this area)'
 
     prompt = (
-        'Write the walkaround feature script for this vehicle.\n'
-        + 'VEHICLE: ' + str(year) + ' ' + str(make) + ' ' + str(model) + ' ' + str(trim) + '\n'
-        + 'PRICE: $' + str(price) + '\n'
-        + '\nHIGHLIGHTED FEATURES FROM LISTING PAGE (use ONLY these - in this order):\n'
-        + 'EXTERIOR features to mention while walking the outside:\n'
-        + (ext_list if ext_list else all_features[:len(all_features)//2]) + '\n'
-        + '\nINTERIOR features to mention while showing inside the car:\n'
-        + (int_list if int_list else all_features[len(all_features)//2:]) + '\n'
-        + '\nWrite ONLY the exterior and interior sections (not intro or outro).\n'
-        + 'Sound like you are physically pointing at each feature.\n'
-        + 'Voice should vary - excited about great features, informative about specs.\n'
-        + '150-220 words total.'
+        'Write a walkaround video script for this vehicle.\n\n'
+        'VEHICLE: ' + str(year) + ' ' + str(make) + ' ' + str(model) + ' ' + str(trim) + color_str + '\n'
+        'PRICE: $' + str(price) + '\n'
+        'SALESPERSON: ' + salesperson_name + '\n'
+        'DEALERSHIP: ' + dealer_name + '\n\n'
+        'FEATURES BY CAMERA POSITION:\n\n'
+        'FRONT of vehicle:\n' + feat_list(front_features) + '\n\n'
+        'DRIVER SIDE:\n' + feat_list(driver_features) + '\n\n'
+        'REAR of vehicle:\n' + feat_list(rear_features) + '\n\n'
+        'PASSENGER SIDE:\n' + feat_list(side_features) + '\n\n'
+        'INTERIOR:\n' + feat_list(interior_feat) + '\n\n'
+        'INTRO (15-20 seconds, selfie mode):\n'
+        'Aaron faces camera, greets viewer warmly, introduces himself and the vehicle.\n'
+        'Must include: his name Aaron, Immaculate Used Cars, year/make/model/trim, color.\n'
+        'End with something like: Let me show you what she has got, or: check this out\n\n'
+        'OUTRO (10-15 seconds):\n'
+        'Mention price $' + str(price) + ', invite to call or visit, sign off with name and dealership.\n\n'
+        'TARGET: 45-65 words per main segment, 20-30 words for intro, 20-25 for outro.\n'
+        'TOTAL: 280-380 words.\n'
+        'Make it sound like a genuinely excited real person, not a formal script.'
     )
 
     response = client.chat.completions.create(
         model='gpt-4o-mini',
-        messages=[{'role': 'system', 'content': SYSTEM_PROMPT}, {'role': 'user', 'content': prompt}],
+        messages=[
+            {'role': 'system', 'content': SYSTEM_PROMPT},
+            {'role': 'user', 'content': prompt}
+        ],
         response_format={'type': 'json_object'},
-        temperature=0.75
+        temperature=0.85
     )
     result = json.loads(response.choices[0].message.content)
 
-    exterior_s = result.get('exterior_script', '')
-    interior_s = result.get('interior_script', '')
-    full_feature = result.get('full_script', '')
-    if not full_feature:
-        full_feature = ' '.join(filter(None, [exterior_s, interior_s]))
+    intro_s = result.get('intro', '')
+    front_s = result.get('front', '')
+    driver_s = result.get('driver_side', '')
+    rear_s = result.get('rear', '')
+    pass_s = result.get('pass_side', '')
+    interior_s = result.get('interior', '')
+    outro_s = result.get('outro', '')
+    full = result.get('full_script', '')
+    if not full:
+        full = ' '.join(filter(None, [intro_s, front_s, driver_s, rear_s, pass_s, interior_s, outro_s]))
 
-    # Combine: fixed intro + AI features + fixed outro
-    full_script = ' '.join(filter(None, [intro_script, full_feature, outro_script]))
-
-    # Build year_make_model for video overlay text
     vehicle['year_make_model'] = ' '.join(filter(None, [str(year), str(make), str(model), str(trim)]))
 
     return {
-        'full_script': full_script,
-        'intro_script': intro_script,
-        'exterior_script': exterior_s,
+        'full_script': full,
+        'intro_script': intro_s,
+        'exterior_script': ' '.join(filter(None, [front_s, driver_s, rear_s, pass_s])),
         'interior_script': interior_s,
-        'outro_script': outro_script,
-        'word_count': len(full_script.split()),
+        'outro_script': outro_s,
+        'segments': {
+            'intro': intro_s,
+            'front': front_s,
+            'driver_side': driver_s,
+            'rear': rear_s,
+            'pass_side': pass_s,
+            'interior': interior_s,
+            'outro': outro_s,
+        },
+        'feature_map': {
+            'front': front_features,
+            'driver_side': driver_features,
+            'rear': rear_features,
+            'pass_side': side_features,
+            'interior': interior_feat,
+        },
+        'word_count': len(full.split()),
     }
