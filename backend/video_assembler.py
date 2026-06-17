@@ -129,58 +129,50 @@ def _download_file(url, dest_path):
 def generate_heygen_avatar_clip(text, look_id, avatar_group_id, voice_id, tmpdir, clip_name):
     print(f'[HeyGen] Generating: {clip_name}')
     sid = get_starfish_voice_id(voice_id)
+    # Use look_id as avatar_id for /v3/videos endpoint
+    avatar_id_to_use = look_id or avatar_group_id
     payload = {
-        'title': 'AutoWalkaround ' + clip_name,
-        'video_inputs': [{
-            'character': {
-                'type': 'avatar',
-                'avatar_id': avatar_group_id,
-                'avatar_style': 'normal',
-                'scale': 1.0,
-                'matting': False,
-            },
-            'voice': {
-                'type': 'text',
-                'input_text': text,
-                'voice_id': sid,
-                'speed': 0.92,
-            },
-            'background': {'type': 'color', 'value': '#1a1a1a'}
-        }],
-        'dimension': {'width': W, 'height': H},
-        'test': False,
+        'type': 'avatar',
+        'avatar_id': avatar_id_to_use,
+        'script': text,
+        'voice_id': sid,
+        'resolution': '720p',
+        'aspect_ratio': '9:16',
+        'output_format': 'mp4',
     }
     try:
-        r = requests.post(HEYGEN_BASE + '/v2/video/generate',
+        r = requests.post(HEYGEN_BASE + '/v3/videos',
                           headers=heygen_headers(), json=payload, timeout=60)
-        print(f'[HeyGen] {clip_name}: {r.status_code}')
+        print(f'[HeyGen] {clip_name}: {r.status_code} {r.text[:300]}')
         if r.status_code not in (200, 201):
             return None
         video_id = r.json().get('data', {}).get('video_id')
         if not video_id:
+            print(f'[HeyGen] No video_id in response: {r.text[:200]}')
             return None
         for i in range(HEYGEN_POLL_MAX):
             time.sleep(HEYGEN_POLL_INTERVAL)
-            pr = requests.get(HEYGEN_BASE + '/v1/video_status.get?video_id=' + video_id,
+            pr = requests.get(HEYGEN_BASE + '/v3/videos/' + video_id,
                               headers=heygen_headers(), timeout=30)
             if pr.status_code == 200:
                 pd = pr.json().get('data', {})
                 st = pd.get('status', '')
                 print(f'[HeyGen] {clip_name} poll {i+1}: {st}')
                 if st == 'completed':
-                    vurl = pd.get('video_url')
+                    vurl = pd.get('video_url') or pd.get('url')
                     if vurl:
                         out = os.path.join(tmpdir, clip_name + '_heygen.mp4')
                         _download_file(vurl, out)
                         return out
                     return None
                 if st == 'failed':
+                    print(f'[HeyGen] {clip_name} failed: {pd.get("error", "")}')
                     return None
+            else:
+                print(f'[HeyGen] poll error {pr.status_code}: {pr.text[:100]}')
     except Exception as e:
         print(f'[HeyGen] Error: {e}')
     return None
-
-
 def _build_photo_bg_clip(photo_path, duration, output_path):
     cmd = [
         'ffmpeg', '-y', '-loop', '1', '-framerate', '24', '-i', photo_path,
