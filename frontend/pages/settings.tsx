@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/router';
 import { onboarding } from '../lib/api';
-import { Plus, Trash2, ArrowLeft, User } from 'lucide-react';
+import { Plus, Trash2, ArrowLeft, User, Video, CheckCircle, AlertCircle } from 'lucide-react';
 
 export default function Settings() {
   const router = useRouter();
@@ -12,6 +12,9 @@ export default function Settings() {
   const [form, setForm] = useState({ name:'', heygen_avatar_id:'', heygen_voice_id:'', lot_background_url:'' });
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  const [sourceVideoUrls, setSourceVideoUrls] = useState<Record<string, string>>({});
+  const [savingVideo, setSavingVideo] = useState<Record<string, boolean>>({});
+  const [videoSaveStatus, setVideoSaveStatus] = useState<Record<string, string>>({});
   const set = (k: string) => (e: any) => setForm(f => ({...f, [k]: e.target.value}));
 
   useEffect(() => { loadAll(); }, []);
@@ -26,6 +29,10 @@ export default function Settings() {
       setSalespersons(sps);
       setAvatars(avs);
       setVoices(vs.slice(0, 50));
+      // Pre-populate source video URL fields
+      const urls: Record<string, string> = {};
+      sps.forEach((sp: any) => { if (sp.source_video_url) urls[sp.id] = sp.source_video_url; });
+      setSourceVideoUrls(urls);
     } catch(e) { router.push('/login'); }
   }
 
@@ -48,6 +55,35 @@ export default function Settings() {
     loadAll();
   }
 
+  async function saveSourceVideo(spId: string) {
+    const url = sourceVideoUrls[spId] || '';
+    if (!url.trim()) return;
+    setSavingVideo(prev => ({...prev, [spId]: true}));
+    setVideoSaveStatus(prev => ({...prev, [spId]: ''}));
+    try {
+      const token = localStorage.getItem('token');
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+      const resp = await fetch(`${apiUrl}/onboarding/salespersons/${spId}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ source_video_url: url.trim() })
+      });
+      if (resp.ok) {
+        setVideoSaveStatus(prev => ({...prev, [spId]: 'saved'}));
+      } else {
+        const err = await resp.json();
+        setVideoSaveStatus(prev => ({...prev, [spId]: 'error: ' + (err.detail || 'failed')}));
+      }
+    } catch(err: any) {
+      setVideoSaveStatus(prev => ({...prev, [spId]: 'error: ' + err.message}));
+    } finally {
+      setSavingVideo(prev => ({...prev, [spId]: false}));
+    }
+  }
+
   return (
     <div className='min-h-screen'>
       <header className='border-b border-gray-800 px-6 py-4 flex items-center gap-4'>
@@ -64,15 +100,49 @@ export default function Settings() {
           {salespersons.length === 0 ? (
             <p className='text-gray-500 text-sm'>No salespersons added yet.</p>
           ) : (
-            <div className='space-y-3'>
+            <div className='space-y-4'>
               {salespersons.map(sp => (
-                <div key={sp.id} className='flex items-center gap-4 p-4 bg-gray-800 rounded-xl'>
-                  <div className='w-10 h-10 bg-brand/20 rounded-full flex items-center justify-center text-brand font-bold'>{sp.name[0]}</div>
-                  <div className='flex-1'>
-                    <p className='font-medium'>{sp.name}</p>
-                    <p className='text-xs text-gray-500'>Avatar: {sp.heygen_avatar_id?.slice(0,12)}...</p>
+                <div key={sp.id} className='p-4 bg-gray-800 rounded-xl space-y-3'>
+                  <div className='flex items-center gap-4'>
+                    <div className='w-10 h-10 bg-brand/20 rounded-full flex items-center justify-center text-brand font-bold flex-shrink-0'>{sp.name[0]}</div>
+                    <div className='flex-1'>
+                      <p className='font-medium'>{sp.name}</p>
+                      <p className='text-xs text-gray-500'>Avatar: {sp.heygen_avatar_id?.slice(0,12)}...</p>
+                    </div>
+                    <button onClick={() => removeSp(sp.id)} className='text-red-400 hover:text-red-300 transition-colors flex-shrink-0'><Trash2 className='w-4 h-4' /></button>
                   </div>
-                  <button onClick={() => removeSp(sp.id)} className='text-red-400 hover:text-red-300 transition-colors'><Trash2 className='w-4 h-4' /></button>
+                  {/* Walkaround Source Video URL */}
+                  <div className='border-t border-gray-700 pt-3'>
+                    <label className='block text-xs font-medium text-gray-400 mb-1 flex items-center gap-1'>
+                      <Video className='w-3 h-3' /> Walkaround Source Video URL
+                      {!sp.source_video_url && !sourceVideoUrls[sp.id] && (
+                        <span className='ml-1 text-yellow-400 text-xs'>⚠ Required to generate videos</span>
+                      )}
+                    </label>
+                    <div className='flex gap-2'>
+                      <input
+                        className='input flex-1 text-sm py-2'
+                        type='url'
+                        value={sourceVideoUrls[sp.id] || ''}
+                        onChange={e => setSourceVideoUrls(prev => ({...prev, [sp.id]: e.target.value}))}
+                        placeholder='https://... direct link to your walkaround recording MP4'
+                      />
+                      <button
+                        onClick={() => saveSourceVideo(sp.id)}
+                        disabled={savingVideo[sp.id] || !sourceVideoUrls[sp.id]}
+                        className='px-3 py-2 bg-brand text-white rounded-xl text-sm font-medium hover:bg-brand/80 disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0 transition-colors'
+                      >
+                        {savingVideo[sp.id] ? 'Saving...' : 'Save'}
+                      </button>
+                    </div>
+                    {videoSaveStatus[sp.id] === 'saved' && (
+                      <p className='text-xs text-green-400 mt-1 flex items-center gap-1'><CheckCircle className='w-3 h-3' /> Saved! Videos will now use this walkaround recording.</p>
+                    )}
+                    {videoSaveStatus[sp.id]?.startsWith('error') && (
+                      <p className='text-xs text-red-400 mt-1 flex items-center gap-1'><AlertCircle className='w-3 h-3' /> {videoSaveStatus[sp.id]}</p>
+                    )}
+                    <p className='text-xs text-gray-600 mt-1'>Paste the direct URL to your walkaround video recording (Supabase, Google Drive direct link, etc.)</p>
+                  </div>
                 </div>
               ))}
             </div>
@@ -121,6 +191,7 @@ export default function Settings() {
             <li>Go to <strong>Voices → Clone Voice</strong> and upload the 2-minute voice sample</li>
             <li>Once cloned, copy the <strong>Voice ID</strong></li>
             <li>Paste both IDs above and click Add Salesperson</li>
+            <li>After adding, paste the <strong>Walkaround Source Video URL</strong> in the salesperson card above and click Save</li>
           </ol>
         </div>
       </main>
