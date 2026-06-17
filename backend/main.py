@@ -1,9 +1,10 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn, os, requests
 from auth import router as auth_router
 from video import router as video_router
 from onboarding import router as onboarding_router
+from db import supabase
 
 app = FastAPI(title='AutoWalkaround API', version='1.0.0')
 
@@ -33,6 +34,20 @@ def debug_looks():
         timeout=30
     )
     return r.json()
+
+@app.post('/admin/set-source-video')
+def set_source_video(
+    salesperson_id: str = Query(...),
+    video_url: str = Query(...),
+    secret: str = Query(...)
+):
+    """Admin endpoint: store source walkaround video URL for a salesperson."""
+    if secret != os.getenv('ADMIN_SECRET', 'aw-admin-2024'):
+        raise HTTPException(status_code=403, detail='Invalid secret')
+    result = supabase.table('salespersons').update(
+        {'source_video_url': video_url}
+    ).eq('id', salesperson_id).execute()
+    return {'status': 'ok', 'salesperson_id': salesperson_id, 'video_url': video_url}
 
 if __name__ == '__main__':
     uvicorn.run('main:app', host='0.0.0.0', port=8000, reload=True)
