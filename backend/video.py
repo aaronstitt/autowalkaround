@@ -181,6 +181,25 @@ async def _run_pipeline(job_id, vehicle_url, salesperson_id, dealership_id, page
         ))
 
         upd('uploading', 'Uploading video...')
+    # Compress video with FFmpeg before upload to stay under Supabase 50MB limit
+    import subprocess as _sp
+    _compressed = tmpdir + '/final_compressed.mp4'
+    try:
+        _sz = os.path.getsize(final_path)
+        print(f'[Upload] Video size: {_sz/1024/1024:.1f} MB')
+        if _sz > 40 * 1024 * 1024:
+            print('[Upload] Compressing with FFmpeg...')
+            _r = _sp.run(['ffmpeg','-y','-i',final_path,'-c:v','libx264','-preset','fast','-crf','28','-c:a','aac','-b:a','96k','-movflags','+faststart',_compressed],capture_output=True,timeout=120)
+            if _r.returncode == 0 and os.path.exists(_compressed):
+                _nsz = os.path.getsize(_compressed)
+                print(f'[Upload] Compressed to {_nsz/1024/1024:.1f} MB')
+                final_path = _compressed
+            else:
+                print(f'[Upload] FFmpeg failed (using original)')
+        else:
+            print(f'[Upload] Size OK, no compression needed')
+    except Exception as _e:
+        print(f'[Upload] Compression error: {_e}')
         storage_path = f'videos/{job_id}_final.mp4'
         with open(final_path, 'rb') as f:
             supabase.storage.from_(SUPABASE_BUCKET).upload(
