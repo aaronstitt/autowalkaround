@@ -31,7 +31,6 @@ def get_avatar_source_video_url(avatar_group_id):
     try:
         url = HEYGEN_BASE + '/v3/avatars/looks?ownership=private&group_id=' + avatar_group_id
         r = requests.get(url, headers=heygen_headers(), timeout=30)
-        print(f'[Avatar] looks API: {r.status_code}')
         if r.status_code == 200:
             data = r.json()
             looks = data.get('data', [])
@@ -40,7 +39,6 @@ def get_avatar_source_video_url(avatar_group_id):
             for look in looks:
                 for key in ['source_video_url', 'video_url', 'source_url', 'original_url', 'training_video_url']:
                     if look.get(key):
-                        print(f'[Avatar] Found source video at {key}: {look[key][:80]}')
                         return look[key]
     except Exception as e:
         print(f'[Avatar] get_source error: {e}')
@@ -96,7 +94,8 @@ def generate_heygen_audio(script_text, avatar_look_id, voice_id, tmpdir):
     return audio_path, {'audio_path': audio_path, 'audio_url': audio_url, 'look_id': avatar_look_id}
 
 def run_video_translation(source_video_url, audio_url, audio_asset_id, tmpdir):
-    """Submit HeyGen Video Translation job: replace audio + re-sync lips."""
+    """Submit HeyGen Video Translation job: replace audio + re-sync lips.
+    HeyGen returns 202 Accepted with translation IDs on success."""
     print(f'[VideoTranslation] source: {source_video_url[:80]}...')
 
     payload = {
@@ -117,13 +116,24 @@ def run_video_translation(source_video_url, audio_url, audio_asset_id, tmpdir):
         payload['audio'] = {'type': 'url', 'url': audio_url}
 
     r = requests.post(HEYGEN_BASE + '/v3/video-translations', headers=heygen_headers(), json=payload, timeout=60)
-    print(f'[VideoTranslation] Create: {r.status_code} {r.text[:200]}')
-    if r.status_code != 200:
+    print(f'[VideoTranslation] Create: {r.status_code} {r.text[:300]}')
+
+    # HeyGen returns 202 Accepted on success for Video Translation
+    if r.status_code not in (200, 201, 202):
         raise RuntimeError(f'VideoTranslation failed: {r.status_code} {r.text[:300]}')
 
-    translation_ids = r.json().get('data', {}).get('video_translation_ids', [])
+    resp_data = r.json()
+    # Handle various response formats
+    data = resp_data.get('data') or resp_data.get('Data') or resp_data
+    if isinstance(data, dict):
+        translation_ids = (data.get('video_translation_ids') or 
+                          data.get('Video_translation_ids') or
+                          data.get('translation_ids') or [])
+    else:
+        translation_ids = []
+
     if not translation_ids:
-        raise RuntimeError(f'No translation IDs: {r.text[:200]}')
+        raise RuntimeError(f'No translation IDs in response: {r.text[:300]}')
 
     translation_id = translation_ids[0]
     print(f'[VideoTranslation] ID: {translation_id} - polling...')
@@ -132,26 +142,31 @@ def run_video_translation(source_video_url, audio_url, audio_asset_id, tmpdir):
         time.sleep(HEYGEN_POLL_INTERVAL)
         try:
             sr = requests.get(HEYGEN_BASE + '/v3/video-translations/' + translation_id,
-                              headers=heygen_headers(), timeout=30)
-            vdata = sr.json().get('data', {})
-            status = vdata.get('status', 'unknown')
-            print(f'[VideoTranslation] Poll {i+1}: {status}')
-            if status in ('completed', 'success'):
-                video_url = vdata.get('video_url') or vdata.get('output_video_url')
-                if not video_url:
-                    raise RuntimeError(f'No video_url in completed response: {json.dumps(vdata)[:200]}')
-                out_path = os.path.join(tmpdir, 'translated_final.mp4')
-                _download_file(video_url, out_path)
-                print(f'[VideoTranslation] Downloaded: {out_path}')
-                return out_path
-            elif status in ('failed', 'error'):
-                raise RuntimeError(f'Translation failed: {vdata.get("error_message", json.dumps(vdata)[:200])}')
+                            headers=heygen_headers(), timeout=30)
+            print(f'[VideoTranslation] Poll {i+1}: HTTP {sr.status_code} {sr.text[:100]}')
+            if sr.status_code == 200:
+                vdata = sr.json().get('data', {})
+                status = vdata.get('status', 'unknown')
+                print(f'[VideoTranslation] Poll {i+1}: status={status}')
+                if status in ('completed', 'success', 'done'):
+                    video_url = (vdata.get('video_url') or vdata.get('output_video_url') or 
+                                vdata.get('output_url'))
+                    if not video_url:
+                        raise RuntimeError(f'No video_url in completed response: {json.dumps(vdata)[:300]}')
+                    out_path = os.path.join(tmpdir, 'translated_final.mp4')
+                    _download_file(video_url, out_path)
+                    print(f'[VideoTranslation] Downloaded: {out_path}')
+                    return out_path
+                elif status in ('failed', 'error'):
+                    raise RuntimeError(f'Translation failed: {vdata.get("error_message", json.dumps(vdata)[:300])}')
+            else:
+                print(f'[VideoTranslation] Poll {i+1} HTTP error: {sr.status_code}')
         except RuntimeError:
             raise
         except Exception as e:
             print(f'[VideoTranslation] Poll {i+1} error: {e}')
 
-    raise RuntimeError('VideoTranslation timed out')
+    raise RuntimeError('VideoTranslation timed out after 75 minutes')
 
 def _download_file(url, dest_path):
     r = requests.get(url, headers=HEADERS, stream=True, timeout=300)
@@ -162,7 +177,7 @@ def _download_file(url, dest_path):
     print(f'[Download] {dest_path} ({os.path.getsize(dest_path)} bytes)')
 
 def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
-                           heygen_result, vehicle_photos, vehicle_video_url, tmpdir):
+                            heygen_result, vehicle_photos, vehicle_video_url, tmpdir):
     source_video_url = heygen_result.get('source_video_url') if isinstance(heygen_result, dict) else None
     audio_url = heygen_result.get('audio_url') if isinstance(heygen_result, dict) else None
     audio_asset_id = heygen_result.get('audio_asset_id') if isinstance(heygen_result, dict) else None
@@ -170,7 +185,7 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
     if not source_video_url:
         raise RuntimeError(
             'source_video_url not set for this salesperson. '
-            'Please add it via the admin API: POST /admin/salesperson-video-url'
+            'Please add it via Settings page or POST /admin/set-source-video'
         )
 
     return run_video_translation(source_video_url, audio_url, audio_asset_id, tmpdir)
