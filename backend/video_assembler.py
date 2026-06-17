@@ -45,8 +45,9 @@ def get_avatar_source_video_url(avatar_group_id):
     return None
 
 def generate_tts_audio(script_text, voice_id, tmpdir):
-    """Generate TTS audio using HeyGen /v3/voices/speech endpoint."""
-    print('[TTS] Generating audio with /v3/voices/speech...')
+    """Generate TTS audio using HeyGen /v3/voices/speech endpoint.
+    HeyGen TTS can take 60-120s for long scripts."""
+    print(f'[TTS] Generating audio, script length: {len(script_text)} chars...')
     payload = {
         'text': script_text,
         'voice_id': voice_id,
@@ -54,19 +55,27 @@ def generate_tts_audio(script_text, voice_id, tmpdir):
         'input_type': 'text',
         'language': 'en'
     }
-    r = requests.post(HEYGEN_BASE + '/v3/voices/speech', headers=heygen_headers(), json=payload, timeout=60)
-    if r.status_code != 200:
-        raise RuntimeError(f'TTS failed: {r.status_code} {r.text[:300]}')
-
-    resp_data = r.json().get('data', {})
-    audio_url = resp_data.get('audio_url')
-    if not audio_url:
-        raise RuntimeError(f'TTS no audio_url in response: {r.text[:300]}')
-
-    audio_path = os.path.join(tmpdir, 'script_audio.mp3')
-    _download_file(audio_url, audio_path)
-    print(f'[TTS] Downloaded: {audio_path} ({os.path.getsize(audio_path)} bytes)')
-    return audio_path, audio_url
+    # Try up to 2 times with 120s timeout
+    last_err = None
+    for attempt in range(2):
+        try:
+            r = requests.post(HEYGEN_BASE + '/v3/voices/speech', headers=heygen_headers(), json=payload, timeout=120)
+            if r.status_code != 200:
+                raise RuntimeError(f'TTS failed: {r.status_code} {r.text[:300]}')
+            resp_data = r.json().get('data', {})
+            audio_url = resp_data.get('audio_url')
+            if not audio_url:
+                raise RuntimeError(f'TTS no audio_url in response: {r.text[:300]}')
+            audio_path = os.path.join(tmpdir, 'script_audio.mp3')
+            _download_file(audio_url, audio_path)
+            print(f'[TTS] Downloaded: {audio_path} ({os.path.getsize(audio_path)} bytes)')
+            return audio_path, audio_url
+        except Exception as e:
+            last_err = e
+            print(f'[TTS] Attempt {attempt+1} failed: {e}')
+            if attempt < 1:
+                time.sleep(5)
+    raise RuntimeError(f'TTS failed after 2 attempts: {last_err}')
 
 def upload_audio_to_heygen(audio_path):
     """Upload audio to HeyGen assets, returns asset_id."""
@@ -123,7 +132,7 @@ def run_video_translation(source_video_url, audio_url, audio_asset_id, tmpdir):
         raise RuntimeError(f'VideoTranslation failed: {r.status_code} {r.text[:300]}')
 
     resp_data = r.json()
-    # Handle various response formats
+    # Handle various response formats (HeyGen uses inconsistent casing)
     data = resp_data.get('data') or resp_data.get('Data') or resp_data
     if isinstance(data, dict):
         translation_ids = (data.get('video_translation_ids') or 
@@ -143,7 +152,6 @@ def run_video_translation(source_video_url, audio_url, audio_asset_id, tmpdir):
         try:
             sr = requests.get(HEYGEN_BASE + '/v3/video-translations/' + translation_id,
                             headers=heygen_headers(), timeout=30)
-            print(f'[VideoTranslation] Poll {i+1}: HTTP {sr.status_code} {sr.text[:100]}')
             if sr.status_code == 200:
                 vdata = sr.json().get('data', {})
                 status = vdata.get('status', 'unknown')
@@ -160,7 +168,7 @@ def run_video_translation(source_video_url, audio_url, audio_asset_id, tmpdir):
                 elif status in ('failed', 'error'):
                     raise RuntimeError(f'Translation failed: {vdata.get("error_message", json.dumps(vdata)[:300])}')
             else:
-                print(f'[VideoTranslation] Poll {i+1} HTTP error: {sr.status_code}')
+                print(f'[VideoTranslation] Poll {i+1} HTTP {sr.status_code}: {sr.text[:100]}')
         except RuntimeError:
             raise
         except Exception as e:
