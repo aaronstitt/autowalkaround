@@ -11,10 +11,7 @@ W, H = 1080, 1920
 WALKAROUND_LOOK = '346a7a4184ec46b985f92fb380ef007c'   # at vehicle, touching, presenting
 INTRO_LOOK      = 'ed119cc46f5f4a6d8a6687ac187cd779'   # facing camera clean on lot
 
-# Aaron's source walkaround reference video
-SOURCE_VIDEO_URL = 'https://poseajyfsbsfvkkuwhiw.supabase.co/storage/v1/object/public/videos/walkarounds/fa5dc22a-03bc-4d21-b47b-09b460eec9fc_source.mp4'
-
-# Immaculate Used Cars lot background image from Google My Business
+# Immaculate Used Cars lot photo from Google My Business (used as scene reference)
 IMMACULATE_LOT_URL = 'https://lh3.googleusercontent.com/gps-cs-s/APNQkAGSkAI7-TAoNkcv4m5PEQRwYfsJdYgypmHTVDUN1Sx4vxRvC13WEcVTnRSkCNWVATeqv7iDe9xxsWWn2VM9ya1BQJEIvTdrY35roeZ3_Sw61Pzeqju1TI0-SlJv2U-qOrKjDKAa=w1333-h1000-k-no'
 
 def heygen_headers():
@@ -43,7 +40,6 @@ def get_starfish_voice_id(preferred_voice_id):
     return preferred_voice_id
 
 def _poll_heygen_video(video_id, clip_name, tmpdir):
-    """Poll until complete and download. Returns local path or None."""
     for i in range(HEYGEN_POLL_MAX):
         time.sleep(HEYGEN_POLL_INTERVAL)
         pr = requests.get(HEYGEN_BASE + '/v3/videos/' + video_id,
@@ -66,25 +62,31 @@ def _poll_heygen_video(video_id, clip_name, tmpdir):
             print(f'[HeyGen] poll error {pr.status_code}: {pr.text[:100]}')
     return None
 
-def generate_cinematic_clip(prompt, look_ids, voice_id, tmpdir, clip_name,
+def generate_cinematic_clip(prompt, look_ids, tmpdir, clip_name,
                             reference_urls=None, duration=13):
     """
-    Generate a cinematic avatar clip using HeyGen Seedance 2.
-    The avatar physically moves through the scene described in the prompt.
-    reference_urls: list of video/image URLs to steer style and composition.
+    Generate a cinematic avatar clip using HeyGen Seedance 2 (cinematic_avatar type).
+    Avatar physically moves through the scene. References must be images or videos < 32MB.
     """
     print(f'[Cinematic] Generating: {clip_name}')
+    look_list = look_ids if isinstance(look_ids, list) else [look_ids]
     payload = {
         'type': 'cinematic_avatar',
         'prompt': prompt,
-        'avatar_id': look_ids if isinstance(look_ids, list) else [look_ids],
+        'avatar_id': look_list,
         'aspect_ratio': '9:16',
         'resolution': '720p',
-        'duration': min(duration, 15),
+        'duration': min(int(duration), 15),
         'enhance_prompt': True,
     }
+    # Only add image references (photos are safe, videos must be < 32MB)
     if reference_urls:
-        payload['references'] = [{'type': 'url', 'url': u} for u in reference_urls[:3]]
+        # Filter to image URLs only - vehicle listing photos are JPEGs, safe to use
+        image_refs = [{'type': 'url', 'url': u} for u in reference_urls
+                      if any(u.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.webp'])
+                      or 'googleusercontent' in u or 'heygen' in u or 'cdn' in u.lower()][:3]
+        if image_refs:
+            payload['references'] = image_refs
     try:
         r = requests.post(HEYGEN_BASE + '/v3/videos',
                           headers=heygen_headers(), json=payload, timeout=60)
@@ -128,7 +130,6 @@ def generate_presenter_clip(text, look_id, voice_id, tmpdir, clip_name):
     return None
 
 def _tts_fallback_clip(text, voice_id, tmpdir, clip_name):
-    """Dark background TTS fallback."""
     try:
         sid = get_starfish_voice_id(voice_id)
         payload = {'text': text, 'voice_id': sid, 'speed': 0.92, 'input_type': 'text', 'language': 'en'}
@@ -217,12 +218,6 @@ def compress_video_for_upload(input_path, tmpdir):
 
 def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
                            heygen_result, vehicle_photos, vehicle_video_url, tmpdir):
-    """
-    Build walkaround video using HeyGen Cinematic Avatar (Seedance 2).
-    Each segment is a cinematic clip with Aaron physically moving around the vehicle,
-    styled after his source walkaround reference video.
-    Intro/outro use presenter mode (talking head) with the intro look.
-    """
     segments = script_segments if isinstance(script_segments, dict) else {}
     voice_id = heygen_result.get('voice_id') if isinstance(heygen_result, dict) else None
     voice_id = voice_id or os.getenv('HEYGEN_VOICE_ID', '6ee20575cb9f4a7e9dc19096a958eab1')
@@ -237,16 +232,14 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
     outro_text = segments.get('outro', '')
     segment_order = ['front', 'driver_side', 'rear', 'pass_side', 'interior']
 
-    # Build reference list: source walkaround video + lot photo + vehicle photos
-    base_refs = [SOURCE_VIDEO_URL, IMMACULATE_LOT_URL]
-    vehicle_refs = [url for url in (vehicle_photos or [])[:2]]
+    # Image references: lot photo + up to 2 vehicle photos (images only, safe size)
+    image_refs = [IMMACULATE_LOT_URL] + list(vehicle_photos or [])[:2]
 
-    print(f'[Build] Cinematic walkaround for {vehicle_name}. Segments: {[s for s in segment_order if segments.get(s)]}')
-    print(f'[Build] References: {len(base_refs)} base + {len(vehicle_refs)} vehicle photos')
+    print(f'[Build] Cinematic walkaround: {vehicle_name}')
 
     all_clips = []
 
-    # INTRO — presenter mode (talking head, facing camera)
+    # INTRO — presenter mode
     if intro_text:
         print('[Build] == INTRO (presenter) ==')
         ic = generate_presenter_clip(intro_text, INTRO_LOOK, voice_id, tmpdir, 'intro')
@@ -255,35 +248,37 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
         if ic:
             all_clips.append(ic)
 
-    # WALKAROUND SEGMENTS — cinematic mode (Aaron physically moving at/around the vehicle)
     segment_prompts = {
         'front': (
-            f'A used car salesman in a light blue dress shirt walks toward the front of a {vehicle_name} '
-            f'parked on a used car lot with an Immaculate Used Cars sign visible in the background. '
-            f'He holds the camera in selfie mode pointed back at himself and the front of the vehicle, '
-            f'gesturing toward the hood and grille as he talks. Handheld selfie POV, natural daylight, '
-            f'dynamic movement around the front bumper.'
+            f'A bald used car salesman in a light blue button-down shirt walks toward '
+            f'the front of a {vehicle_name} on an Immaculate Used Cars lot. '
+            f'He holds his iPhone in selfie mode pointed back at himself and the vehicle front, '
+            f'smiling and gesturing at the hood, grille, and headlights. '
+            f'Handheld selfie POV, daylight, enthusiastic energy.'
         ),
         'driver_side': (
-            f'A used car salesman in a light blue dress shirt walks along the driver side of a {vehicle_name} '
-            f'on a used car lot. He holds the camera in selfie mode, turning to point out the doors, windows, '
-            f'and wheels as he moves. The Immaculate Used Cars lot is visible behind him. '
-            f'Handheld selfie POV, natural movement along the vehicle.'
+            f'A bald used car salesman in a light blue button-down shirt walks along '
+            f'the driver side of a {vehicle_name} on an Immaculate Used Cars lot. '
+            f'He holds his iPhone in selfie mode, turning to point out the doors, '
+            f'mirrors, and wheels as he strides past. Handheld selfie POV, natural daylight.'
         ),
         'rear': (
-            f'A used car salesman in a light blue dress shirt stands behind a {vehicle_name} on a used car lot, '
-            f'holding the camera in selfie mode and gesturing toward the rear hatch, taillights, and bumper. '
-            f'The Immaculate Used Cars lot is visible in the background. Energetic, engaging selfie POV.'
+            f'A bald used car salesman in a light blue button-down shirt stands behind '
+            f'a {vehicle_name} on an Immaculate Used Cars lot. '
+            f'He holds his iPhone in selfie mode pointing at himself and the rear of the vehicle, '
+            f'gesturing at the taillights and hatch. Handheld selfie POV, enthusiastic delivery.'
         ),
         'pass_side': (
-            f'A used car salesman in a light blue dress shirt walks along the passenger side of a {vehicle_name} '
-            f'on a used car lot, holding camera in selfie mode and pointing out the passenger doors and exterior. '
-            f'Immaculate Used Cars lot visible. Handheld selfie POV, natural walking movement.'
+            f'A bald used car salesman in a light blue button-down shirt walks along '
+            f'the passenger side of a {vehicle_name} on an Immaculate Used Cars lot. '
+            f'He holds his iPhone in selfie mode and points to the passenger door and exterior trim. '
+            f'Handheld selfie POV, natural walking motion.'
         ),
         'interior': (
-            f'A used car salesman in a light blue dress shirt opens the door of a {vehicle_name} and leans inside, '
-            f'holding the camera in selfie mode to show the dashboard, seats, and interior features. '
-            f'He gestures toward the steering wheel and center console. Handheld selfie POV, warm interior lighting.'
+            f'A bald used car salesman in a light blue button-down shirt opens the door '
+            f'of a {vehicle_name} and leans in, holding his iPhone in selfie mode '
+            f'to show the dashboard, seats, and interior. He gestures at the steering wheel '
+            f'and center console. Warm interior lighting, close-up selfie POV.'
         ),
     }
 
@@ -293,34 +288,24 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
         if not seg_text or not seg_text.strip():
             continue
         print(f'[Build] Cinematic segment: {seg_name}')
-
-        # Build prompt: shot description + narration content hint
-        base_prompt = segment_prompts.get(seg_name, '')
-        # Extract key feature phrases from the script to guide what Aaron says/does visually
-        prompt = f'{base_prompt} He is enthusiastically narrating: "{seg_text[:200]}"'
-
-        # References: source video (style guide) + vehicle photos for this segment
-        seg_refs = base_refs + vehicle_refs
-
+        prompt = segment_prompts.get(seg_name, '') + f' Narrating: "{seg_text[:180]}"'
         sc = generate_cinematic_clip(
             prompt=prompt,
             look_ids=[WALKAROUND_LOOK],
-            voice_id=voice_id,
             tmpdir=tmpdir,
             clip_name=seg_name,
-            reference_urls=seg_refs,
+            reference_urls=image_refs,
             duration=13
         )
         if not sc:
-            # Fallback: presenter mode with walkaround look
-            print(f'[Build] Cinematic failed for {seg_name}, falling back to presenter')
+            print(f'[Build] Cinematic failed {seg_name}, trying presenter')
             sc = generate_presenter_clip(seg_text, WALKAROUND_LOOK, voice_id, tmpdir, seg_name + '_fb')
         if not sc:
             sc = _tts_fallback_clip(seg_text, voice_id, tmpdir, seg_name)
         if sc:
             all_clips.append(sc)
 
-    # OUTRO — presenter mode (talking head, facing camera)
+    # OUTRO — presenter mode
     if outro_text:
         print('[Build] == OUTRO (presenter) ==')
         oc = generate_presenter_clip(outro_text, INTRO_LOOK, voice_id, tmpdir, 'outro')
@@ -340,7 +325,6 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
 
     return compress_video_for_upload(final_path, tmpdir)
 
-# Compatibility stubs
 def get_look_id(avatar_group_id):
     return INTRO_LOOK
 
