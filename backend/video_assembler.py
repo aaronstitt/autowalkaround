@@ -182,7 +182,7 @@ def apply_lipsync(cinematic_local_path, audio_public_url, clip_name, tmpdir):
         r = requests.post(HEYGEN_BASE + '/v3/lipsyncs', headers=heygen_headers(),
                           json=payload, timeout=60)
         print(f'[Lipsync] {clip_name} create: HTTP {r.status_code} {r.text[:300]}')
-        if r.status_code not in (200, 201):
+        if r.status_code not in (200, 201, 202):
             return None
         lipsync_id = r.json().get('data', {}).get('lipsync_id')
         if not lipsync_id:
