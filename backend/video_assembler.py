@@ -1,4 +1,4 @@
-import os, requests, time, json, subprocess
+import os, requests, time, subprocess
 
 HEADERS = {'User-Agent': 'Mozilla/5.0'}
 HEYGEN_BASE = 'https://api.heygen.com'
@@ -8,8 +8,14 @@ HEYGEN_POLL_MAX = 240
 W, H = 1080, 1920
 
 # Aaron's look IDs
-INTRO_OUTRO_LOOK = 'ed119cc46f5f4a6d8a6687ac187cd779'   # Sharp Used Car Salesman - facing camera on lot
-WALKAROUND_LOOK  = '346a7a4184ec46b985f92fb380ef007c'   # Sharp Used Car Salesman - at vehicle, touching, presenting
+WALKAROUND_LOOK = '346a7a4184ec46b985f92fb380ef007c'   # at vehicle, touching, presenting
+INTRO_LOOK      = 'ed119cc46f5f4a6d8a6687ac187cd779'   # facing camera clean on lot
+
+# Aaron's source walkaround reference video
+SOURCE_VIDEO_URL = 'https://poseajyfsbsfvkkuwhiw.supabase.co/storage/v1/object/public/videos/walkarounds/fa5dc22a-03bc-4d21-b47b-09b460eec9fc_source.mp4'
+
+# Immaculate Used Cars lot background image from Google My Business
+IMMACULATE_LOT_URL = 'https://lh3.googleusercontent.com/gps-cs-s/APNQkAGSkAI7-TAoNkcv4m5PEQRwYfsJdYgypmHTVDUN1Sx4vxRvC13WEcVTnRSkCNWVATeqv7iDe9xxsWWn2VM9ya1BQJEIvTdrY35roeZ3_Sw61Pzeqju1TI0-SlJv2U-qOrKjDKAa=w1333-h1000-k-no'
 
 def heygen_headers():
     return {'x-api-key': os.getenv('HEYGEN_API_KEY'), 'Content-Type': 'application/json'}
@@ -36,8 +42,67 @@ def get_starfish_voice_id(preferred_voice_id):
         pass
     return preferred_voice_id
 
-def generate_heygen_clip(text, look_id, voice_id, tmpdir, clip_name):
-    print(f'[HeyGen] Generating: {clip_name} with look {look_id[:8]}...')
+def _poll_heygen_video(video_id, clip_name, tmpdir):
+    """Poll until complete and download. Returns local path or None."""
+    for i in range(HEYGEN_POLL_MAX):
+        time.sleep(HEYGEN_POLL_INTERVAL)
+        pr = requests.get(HEYGEN_BASE + '/v3/videos/' + video_id,
+                          headers=heygen_headers(), timeout=30)
+        if pr.status_code == 200:
+            pd = pr.json().get('data', {})
+            st = pd.get('status', '')
+            print(f'[HeyGen] {clip_name} poll {i+1}: {st}')
+            if st == 'completed':
+                vurl = pd.get('video_url') or pd.get('url')
+                if vurl:
+                    out = os.path.join(tmpdir, clip_name + '_heygen.mp4')
+                    _download_file(vurl, out)
+                    return out
+                return None
+            if st == 'failed':
+                print(f'[HeyGen] {clip_name} failed: {pd.get("error", pd.get("failure_message", ""))}')
+                return None
+        else:
+            print(f'[HeyGen] poll error {pr.status_code}: {pr.text[:100]}')
+    return None
+
+def generate_cinematic_clip(prompt, look_ids, voice_id, tmpdir, clip_name,
+                            reference_urls=None, duration=13):
+    """
+    Generate a cinematic avatar clip using HeyGen Seedance 2.
+    The avatar physically moves through the scene described in the prompt.
+    reference_urls: list of video/image URLs to steer style and composition.
+    """
+    print(f'[Cinematic] Generating: {clip_name}')
+    payload = {
+        'type': 'cinematic_avatar',
+        'prompt': prompt,
+        'avatar_id': look_ids if isinstance(look_ids, list) else [look_ids],
+        'aspect_ratio': '9:16',
+        'resolution': '720p',
+        'duration': min(duration, 15),
+        'enhance_prompt': True,
+    }
+    if reference_urls:
+        payload['references'] = [{'type': 'url', 'url': u} for u in reference_urls[:3]]
+    try:
+        r = requests.post(HEYGEN_BASE + '/v3/videos',
+                          headers=heygen_headers(), json=payload, timeout=60)
+        print(f'[Cinematic] {clip_name}: {r.status_code} {r.text[:300]}')
+        if r.status_code not in (200, 201):
+            return None
+        video_id = r.json().get('data', {}).get('video_id')
+        if not video_id:
+            print(f'[Cinematic] No video_id: {r.text[:200]}')
+            return None
+        return _poll_heygen_video(video_id, clip_name, tmpdir)
+    except Exception as e:
+        print(f'[Cinematic] Error: {e}')
+    return None
+
+def generate_presenter_clip(text, look_id, voice_id, tmpdir, clip_name):
+    """Generate a presenter (talking head) clip for intro/outro."""
+    print(f'[Presenter] Generating: {clip_name}')
     sid = get_starfish_voice_id(voice_id)
     payload = {
         'type': 'avatar',
@@ -51,38 +116,19 @@ def generate_heygen_clip(text, look_id, voice_id, tmpdir, clip_name):
     try:
         r = requests.post(HEYGEN_BASE + '/v3/videos',
                           headers=heygen_headers(), json=payload, timeout=60)
-        print(f'[HeyGen] {clip_name}: {r.status_code} {r.text[:300]}')
+        print(f'[Presenter] {clip_name}: {r.status_code} {r.text[:300]}')
         if r.status_code not in (200, 201):
             return None
         video_id = r.json().get('data', {}).get('video_id')
         if not video_id:
-            print(f'[HeyGen] No video_id in response: {r.text[:200]}')
             return None
-        for i in range(HEYGEN_POLL_MAX):
-            time.sleep(HEYGEN_POLL_INTERVAL)
-            pr = requests.get(HEYGEN_BASE + '/v3/videos/' + video_id,
-                              headers=heygen_headers(), timeout=30)
-            if pr.status_code == 200:
-                pd = pr.json().get('data', {})
-                st = pd.get('status', '')
-                print(f'[HeyGen] {clip_name} poll {i+1}: {st}')
-                if st == 'completed':
-                    vurl = pd.get('video_url') or pd.get('url')
-                    if vurl:
-                        out = os.path.join(tmpdir, clip_name + '_heygen.mp4')
-                        _download_file(vurl, out)
-                        return out
-                    return None
-                if st == 'failed':
-                    print(f'[HeyGen] {clip_name} failed: {pd.get("error", "")}')
-                    return None
-            else:
-                print(f'[HeyGen] poll error {pr.status_code}: {pr.text[:100]}')
+        return _poll_heygen_video(video_id, clip_name, tmpdir)
     except Exception as e:
-        print(f'[HeyGen] Error: {e}')
+        print(f'[Presenter] Error: {e}')
     return None
 
 def _tts_fallback_clip(text, voice_id, tmpdir, clip_name):
+    """Dark background TTS fallback."""
     try:
         sid = get_starfish_voice_id(voice_id)
         payload = {'text': text, 'voice_id': sid, 'speed': 0.92, 'input_type': 'text', 'language': 'en'}
@@ -171,41 +217,113 @@ def compress_video_for_upload(input_path, tmpdir):
 
 def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
                            heygen_result, vehicle_photos, vehicle_video_url, tmpdir):
+    """
+    Build walkaround video using HeyGen Cinematic Avatar (Seedance 2).
+    Each segment is a cinematic clip with Aaron physically moving around the vehicle,
+    styled after his source walkaround reference video.
+    Intro/outro use presenter mode (talking head) with the intro look.
+    """
     segments = script_segments if isinstance(script_segments, dict) else {}
     voice_id = heygen_result.get('voice_id') if isinstance(heygen_result, dict) else None
     voice_id = voice_id or os.getenv('HEYGEN_VOICE_ID', '6ee20575cb9f4a7e9dc19096a958eab1')
+
+    year  = vehicle.get('year', '')
+    make  = vehicle.get('make', '')
+    model = vehicle.get('model', '')
+    trim  = vehicle.get('trim', '')
+    vehicle_name = f'{year} {make} {model} {trim}'.strip()
 
     intro_text = segments.get('intro', '')
     outro_text = segments.get('outro', '')
     segment_order = ['front', 'driver_side', 'rear', 'pass_side', 'interior']
 
-    print(f'[Build] Full-frame walkaround. Intro/outro look: {INTRO_OUTRO_LOOK[:8]} Segment look: {WALKAROUND_LOOK[:8]}')
+    # Build reference list: source walkaround video + lot photo + vehicle photos
+    base_refs = [SOURCE_VIDEO_URL, IMMACULATE_LOT_URL]
+    vehicle_refs = [url for url in (vehicle_photos or [])[:2]]
+
+    print(f'[Build] Cinematic walkaround for {vehicle_name}. Segments: {[s for s in segment_order if segments.get(s)]}')
+    print(f'[Build] References: {len(base_refs)} base + {len(vehicle_refs)} vehicle photos')
 
     all_clips = []
 
+    # INTRO — presenter mode (talking head, facing camera)
     if intro_text:
-        print('[Build] == INTRO ==')
-        ic = generate_heygen_clip(intro_text, INTRO_OUTRO_LOOK, voice_id, tmpdir, 'intro')
+        print('[Build] == INTRO (presenter) ==')
+        ic = generate_presenter_clip(intro_text, INTRO_LOOK, voice_id, tmpdir, 'intro')
         if not ic:
             ic = _tts_fallback_clip(intro_text, voice_id, tmpdir, 'intro')
         if ic:
             all_clips.append(ic)
 
-    print('[Build] == SEGMENTS ==')
+    # WALKAROUND SEGMENTS — cinematic mode (Aaron physically moving at/around the vehicle)
+    segment_prompts = {
+        'front': (
+            f'A used car salesman in a light blue dress shirt walks toward the front of a {vehicle_name} '
+            f'parked on a used car lot with an Immaculate Used Cars sign visible in the background. '
+            f'He holds the camera in selfie mode pointed back at himself and the front of the vehicle, '
+            f'gesturing toward the hood and grille as he talks. Handheld selfie POV, natural daylight, '
+            f'dynamic movement around the front bumper.'
+        ),
+        'driver_side': (
+            f'A used car salesman in a light blue dress shirt walks along the driver side of a {vehicle_name} '
+            f'on a used car lot. He holds the camera in selfie mode, turning to point out the doors, windows, '
+            f'and wheels as he moves. The Immaculate Used Cars lot is visible behind him. '
+            f'Handheld selfie POV, natural movement along the vehicle.'
+        ),
+        'rear': (
+            f'A used car salesman in a light blue dress shirt stands behind a {vehicle_name} on a used car lot, '
+            f'holding the camera in selfie mode and gesturing toward the rear hatch, taillights, and bumper. '
+            f'The Immaculate Used Cars lot is visible in the background. Energetic, engaging selfie POV.'
+        ),
+        'pass_side': (
+            f'A used car salesman in a light blue dress shirt walks along the passenger side of a {vehicle_name} '
+            f'on a used car lot, holding camera in selfie mode and pointing out the passenger doors and exterior. '
+            f'Immaculate Used Cars lot visible. Handheld selfie POV, natural walking movement.'
+        ),
+        'interior': (
+            f'A used car salesman in a light blue dress shirt opens the door of a {vehicle_name} and leans inside, '
+            f'holding the camera in selfie mode to show the dashboard, seats, and interior features. '
+            f'He gestures toward the steering wheel and center console. Handheld selfie POV, warm interior lighting.'
+        ),
+    }
+
+    print('[Build] == CINEMATIC SEGMENTS ==')
     for seg_name in segment_order:
         seg_text = segments.get(seg_name, '')
         if not seg_text or not seg_text.strip():
             continue
-        print(f'[Build] Segment: {seg_name}')
-        sc = generate_heygen_clip(seg_text, WALKAROUND_LOOK, voice_id, tmpdir, seg_name)
+        print(f'[Build] Cinematic segment: {seg_name}')
+
+        # Build prompt: shot description + narration content hint
+        base_prompt = segment_prompts.get(seg_name, '')
+        # Extract key feature phrases from the script to guide what Aaron says/does visually
+        prompt = f'{base_prompt} He is enthusiastically narrating: "{seg_text[:200]}"'
+
+        # References: source video (style guide) + vehicle photos for this segment
+        seg_refs = base_refs + vehicle_refs
+
+        sc = generate_cinematic_clip(
+            prompt=prompt,
+            look_ids=[WALKAROUND_LOOK],
+            voice_id=voice_id,
+            tmpdir=tmpdir,
+            clip_name=seg_name,
+            reference_urls=seg_refs,
+            duration=13
+        )
+        if not sc:
+            # Fallback: presenter mode with walkaround look
+            print(f'[Build] Cinematic failed for {seg_name}, falling back to presenter')
+            sc = generate_presenter_clip(seg_text, WALKAROUND_LOOK, voice_id, tmpdir, seg_name + '_fb')
         if not sc:
             sc = _tts_fallback_clip(seg_text, voice_id, tmpdir, seg_name)
         if sc:
             all_clips.append(sc)
 
+    # OUTRO — presenter mode (talking head, facing camera)
     if outro_text:
-        print('[Build] == OUTRO ==')
-        oc = generate_heygen_clip(outro_text, INTRO_OUTRO_LOOK, voice_id, tmpdir, 'outro')
+        print('[Build] == OUTRO (presenter) ==')
+        oc = generate_presenter_clip(outro_text, INTRO_LOOK, voice_id, tmpdir, 'outro')
         if not oc:
             oc = _tts_fallback_clip(outro_text, voice_id, tmpdir, 'outro')
         if oc:
@@ -222,8 +340,9 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
 
     return compress_video_for_upload(final_path, tmpdir)
 
+# Compatibility stubs
 def get_look_id(avatar_group_id):
-    return INTRO_OUTRO_LOOK
+    return INTRO_LOOK
 
 def upload_audio_to_heygen(audio_path):
     return None
