@@ -2,8 +2,14 @@ import os, requests, time, subprocess, hashlib
 
 HEADERS = {'User-Agent': 'Mozilla/5.0'}
 HEYGEN_BASE = 'https://api.heygen.com'
-HEYGEN_POLL_INTERVAL = 15
-HEYGEN_POLL_MAX = 240
+
+# Tight timeouts: cinematic renders in ~3-5 min, lipsync in ~2-4 min
+CINEMATIC_POLL_INTERVAL = 20   # seconds between polls
+CINEMATIC_POLL_MAX      = 18   # max 6 minutes
+LIPSYNC_POLL_INTERVAL   = 15   # seconds between polls
+LIPSYNC_POLL_MAX        = 20   # max 5 minutes
+PRESENTER_POLL_INTERVAL = 20   # seconds between polls
+PRESENTER_POLL_MAX      = 15   # max 5 minutes
 
 W, H = 1080, 1920
 
@@ -95,51 +101,84 @@ def _cinematic_refs(raw_urls):
     return refs
 
 def _poll_heygen_video(video_id, clip_name, tmpdir):
-    for i in range(HEYGEN_POLL_MAX):
-        time.sleep(HEYGEN_POLL_INTERVAL)
-        pr = requests.get(HEYGEN_BASE + '/v3/videos/' + video_id, headers=heygen_headers(), timeout=30)
-        if pr.status_code == 200:
-            pd  = pr.json().get('data', {})
-            st  = pd.get('status', '')
-            print(f'[HeyGen] {clip_name} poll {i+1}: {st}')
-            if st == 'completed':
-                vurl = pd.get('video_url') or pd.get('url')
-                if vurl:
-                    out = os.path.join(tmpdir, clip_name + '_heygen.mp4')
-                    _download_file(vurl, out)
-                    return out
-                return None
-            if st == 'failed':
-                print(f'[HeyGen] {clip_name} failed: {pd.get("error", pd.get("failure_message", ""))}')
-                return None
-        else:
-            print(f'[HeyGen] poll error {pr.status_code}')
+    for i in range(PRESENTER_POLL_MAX):
+        time.sleep(PRESENTER_POLL_INTERVAL)
+        try:
+            pr = requests.get(HEYGEN_BASE + '/v3/videos/' + video_id, headers=heygen_headers(), timeout=30)
+            if pr.status_code == 200:
+                pd  = pr.json().get('data', {})
+                st  = pd.get('status', '')
+                print(f'[HeyGen] {clip_name} poll {i+1}: {st}')
+                if st == 'completed':
+                    vurl = pd.get('video_url') or pd.get('url')
+                    if vurl:
+                        out = os.path.join(tmpdir, clip_name + '_heygen.mp4')
+                        _download_file(vurl, out)
+                        return out
+                    return None
+                if st == 'failed':
+                    print(f'[HeyGen] {clip_name} failed: {pd.get("error", pd.get("failure_message", ""))}')
+                    return None
+            else:
+                print(f'[HeyGen] poll error {pr.status_code}')
+        except Exception as e:
+            print(f'[HeyGen] poll exception: {e}')
+    print(f'[HeyGen] {clip_name} timed out after {PRESENTER_POLL_MAX} polls')
+    return None
+
+def _poll_cinematic_video(video_id, clip_name, tmpdir):
+    for i in range(CINEMATIC_POLL_MAX):
+        time.sleep(CINEMATIC_POLL_INTERVAL)
+        try:
+            pr = requests.get(HEYGEN_BASE + '/v3/videos/' + video_id, headers=heygen_headers(), timeout=30)
+            if pr.status_code == 200:
+                pd  = pr.json().get('data', {})
+                st  = pd.get('status', '')
+                print(f'[Cinematic] {clip_name} poll {i+1}: {st}')
+                if st == 'completed':
+                    vurl = pd.get('video_url') or pd.get('url')
+                    if vurl:
+                        out = os.path.join(tmpdir, clip_name + '_cinematic.mp4')
+                        _download_file(vurl, out)
+                        return out
+                    return None
+                if st == 'failed':
+                    msg = pd.get('failure_message') or pd.get('error', '')
+                    print(f'[Cinematic] {clip_name} failed: {msg}')
+                    return None
+            else:
+                print(f'[Cinematic] poll error {pr.status_code}: {pr.text[:100]}')
+        except Exception as e:
+            print(f'[Cinematic] poll exception: {e}')
+    print(f'[Cinematic] {clip_name} timed out after {CINEMATIC_POLL_MAX} polls')
     return None
 
 def _poll_lipsync(lipsync_id, clip_name, tmpdir):
-    for i in range(HEYGEN_POLL_MAX):
-        time.sleep(HEYGEN_POLL_INTERVAL)
+    for i in range(LIPSYNC_POLL_MAX):
+        time.sleep(LIPSYNC_POLL_INTERVAL)
         try:
             pr = requests.get(HEYGEN_BASE + '/v3/lipsyncs/' + lipsync_id,
                               headers=heygen_headers(), timeout=30)
             print(f'[Lipsync] {clip_name} poll {i+1}: HTTP {pr.status_code}')
             if pr.status_code == 200:
                 pd   = pr.json().get('data', {})
+                st   = pd.get('status', '')
                 vurl = pd.get('video_url')
                 fail = pd.get('failure_message')
+                print(f'[Lipsync] {clip_name} status: {st}')
                 if vurl:
                     out = os.path.join(tmpdir, clip_name + '_lipsync.mp4')
                     _download_file(vurl, out)
                     print(f'[Lipsync] {clip_name} done')
                     return out
-                if fail:
+                if fail or st == 'failed':
                     print(f'[Lipsync] {clip_name} failed: {fail}')
                     return None
             else:
                 print(f'[Lipsync] poll error {pr.status_code}: {pr.text[:200]}')
         except Exception as e:
             print(f'[Lipsync] poll exception: {e}')
-    print(f'[Lipsync] {clip_name} timed out')
+    print(f'[Lipsync] {clip_name} timed out after {LIPSYNC_POLL_MAX} polls')
     return None
 
 def generate_tts_audio_url(text, voice_id, tmpdir, clip_name):
@@ -219,7 +258,7 @@ def generate_cinematic_clip(prompt, look_ids, tmpdir, clip_name, reference_urls=
         video_id = r.json().get('data', {}).get('video_id')
         if not video_id:
             return None
-        return _poll_heygen_video(video_id, clip_name, tmpdir)
+        return _poll_cinematic_video(video_id, clip_name, tmpdir)
     except Exception as e:
         print(f'[Cinematic] Error: {e}')
         return None
