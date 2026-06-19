@@ -7,13 +7,13 @@ client = openai.OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 # ──────────────────────────────────────────────
 # SEGMENTED walkaround script - each segment maps to a camera position
 # Order mirrors walkaround v4.mov:
-#   intro     -> selfie face-cam: salesperson intro
-#   front     -> camera faces vehicle front
-#   driver_side -> walking to driver side
-#   rear      -> at rear of vehicle
-#   pass_side -> passenger side
-#   interior  -> inside vehicle
-#   outro     -> closing, price, CTA
+# intro -> selfie face-cam: salesperson intro
+# front -> camera faces vehicle front
+# driver_side -> walking to driver side
+# rear -> at rear of vehicle
+# pass_side -> passenger side
+# interior -> inside vehicle
+# outro -> closing, price, CTA
 # ──────────────────────────────────────────────
 
 SYSTEM_PROMPT = """You are an expert automotive walkaround video scriptwriter.
@@ -36,6 +36,13 @@ STYLE RULES:
 5. Use enthusiasm: This is awesome, I love this, Check that out, This one is huge
 6. ONLY mention features matching the camera position segment
 7. ONLY use features from the Highlighted Features list - never invent features
+
+CRITICAL LENGTH REQUIREMENT:
+- Each main segment (front, driver_side, rear, pass_side, interior) must be 20-28 words MAX.
+- At normal speaking pace that is 10-13 seconds of audio - this is required for lip sync to work.
+- If you write more than 28 words for any segment, the video will not lip sync correctly.
+- Intro: 25-35 words. Outro: 20-28 words.
+- Count your words carefully before returning the JSON.
 
 Return ONLY valid JSON with exactly these keys:
 intro, front, driver_side, rear, pass_side, interior, outro, full_script, word_count"""
@@ -105,15 +112,18 @@ def generate_walkaround_script(vehicle, salesperson_name, dealer_name='Immaculat
         'REAR of vehicle:\n' + feat_list(rear_features) + '\n\n'
         'PASSENGER SIDE:\n' + feat_list(side_features) + '\n\n'
         'INTERIOR:\n' + feat_list(interior_feat) + '\n\n'
-        'INTRO (15-20 seconds, selfie mode):\n'
+        'INTRO (25-35 words MAX - selfie mode):\n'
         'Aaron faces camera, greets viewer warmly, introduces himself and the vehicle.\n'
-        'Must include: his name Aaron, Immaculate Used Cars, year/make/model/trim, color.\n'
-        'End with something like: Let me show you what she has got, or: check this out\n\n'
-        'OUTRO (10-15 seconds):\n'
+        'Must include: his name Aaron, Immaculate Used Cars, year/make/model/trim.\n'
+        'End with something like: Let me show you what she has got.\n\n'
+        'EACH MAIN SEGMENT (front, driver_side, rear, pass_side, interior):\n'
+        'STRICT MAXIMUM: 20-28 words per segment. No more. This is critical for lip sync.\n'
+        'Pick 1-2 features max per segment. Be punchy and enthusiastic.\n\n'
+        'OUTRO (20-28 words MAX):\n'
         'Mention price $' + str(price) + ', invite to call or visit, sign off with name and dealership.\n\n'
-        'TARGET: 45-65 words per main segment, 20-30 words for intro, 20-25 for outro.\n'
-        'TOTAL: 280-380 words.\n'
-        'Make it sound like a genuinely excited real person, not a formal script.'
+        'TOTAL TARGET: 160-220 words across all segments combined.\n'
+        'Make it sound like a genuinely excited real person, not a formal script.\n'
+        'COUNT YOUR WORDS. Each segment must be 20-28 words or less.'
     )
 
     response = client.chat.completions.create(
@@ -137,6 +147,22 @@ def generate_walkaround_script(vehicle, salesperson_name, dealer_name='Immaculat
     full = result.get('full_script', '')
     if not full:
         full = ' '.join(filter(None, [intro_s, front_s, driver_s, rear_s, pass_s, interior_s, outro_s]))
+
+    # Hard truncation safety net: if any segment exceeds ~130 words/min * 13s = ~28 words, trim it
+    def _trim_to_words(text, max_words=28):
+        words = text.split()
+        if len(words) > max_words:
+            trimmed = ' '.join(words[:max_words])
+            print(f'[Script] Trimmed segment from {len(words)} to {max_words} words')
+            return trimmed
+        return text
+
+    front_s = _trim_to_words(front_s)
+    driver_s = _trim_to_words(driver_s)
+    rear_s = _trim_to_words(rear_s)
+    pass_s = _trim_to_words(pass_s)
+    interior_s = _trim_to_words(interior_s)
+    outro_s = _trim_to_words(outro_s)
 
     vehicle['year_make_model'] = ' '.join(filter(None, [str(year), str(make), str(model), str(trim)]))
 
