@@ -4,18 +4,23 @@ HEADERS = {'User-Agent': 'Mozilla/5.0'}
 HEYGEN_BASE = 'https://api.heygen.com'
 
 # Tight timeouts: cinematic renders in ~3-5 min, lipsync in ~2-4 min
-CINEMATIC_POLL_INTERVAL = 20   # seconds between polls
-CINEMATIC_POLL_MAX      = 18   # max 6 minutes
-LIPSYNC_POLL_INTERVAL   = 15   # seconds between polls
-LIPSYNC_POLL_MAX        = 20   # max 5 minutes
-PRESENTER_POLL_INTERVAL = 20   # seconds between polls
-PRESENTER_POLL_MAX      = 15   # max 5 minutes
+CINEMATIC_POLL_INTERVAL = 20 # seconds between polls
+CINEMATIC_POLL_MAX = 18 # max 6 minutes
+LIPSYNC_POLL_INTERVAL = 15 # seconds between polls
+LIPSYNC_POLL_MAX = 20 # max 5 minutes
+PRESENTER_POLL_INTERVAL = 20 # seconds between polls
+PRESENTER_POLL_MAX = 15 # max 5 minutes
 
 W, H = 1080, 1920
 
 WALKAROUND_LOOK = '346a7a4184ec46b985f92fb380ef007c'
-INTRO_LOOK      = 'ed119cc46f5f4a6d8a6687ac187cd779'
+INTRO_LOOK = 'ed119cc46f5f4a6d8a6687ac187cd779'
 IMMACULATE_LOT_URL = 'https://lh3.googleusercontent.com/gps-cs-s/APNQkAGSkAI7-TAoNkcv4m5PEQRwYfsJdYgypmHTVDUN1Sx4vxRvC13WEcVTnRSkCNWVATeqv7iDe9xxsWWn2VM9ya1BQJEIvTdrY35roeZ3_Sw61Pzeqju1TI0-SlJv2U-qOrKjDKAa=w1333-h1000-k-no'
+
+# HeyGen cinematic max is 15 seconds. Lipsync requires audio/video durations within 15%.
+# We match cinematic duration to actual TTS audio duration to guarantee lipsync passes.
+CINEMATIC_MIN_DURATION = 5   # minimum cinematic clip seconds
+CINEMATIC_MAX_DURATION = 15  # HeyGen hard cap
 
 def heygen_headers():
     return {'x-api-key': os.getenv('HEYGEN_API_KEY'), 'Content-Type': 'application/json'}
@@ -158,7 +163,7 @@ def _poll_lipsync(lipsync_id, clip_name, tmpdir):
         time.sleep(LIPSYNC_POLL_INTERVAL)
         try:
             pr = requests.get(HEYGEN_BASE + '/v3/lipsyncs/' + lipsync_id,
-                              headers=heygen_headers(), timeout=30)
+                               headers=heygen_headers(), timeout=30)
             print(f'[Lipsync] {clip_name} poll {i+1}: HTTP {pr.status_code}')
             if pr.status_code == 200:
                 pd   = pr.json().get('data', {})
@@ -213,8 +218,7 @@ def apply_lipsync(cinematic_local_path, audio_public_url, clip_name, tmpdir):
     payload = {
         'video': {'type': 'url', 'url': video_pub_url},
         'audio': {'type': 'url', 'url': audio_public_url},
-        'mode':  'precision',
-        'enable_dynamic_duration': True,
+        'mode': 'precision',
         'title': f'walkaround_{clip_name}',
     }
     try:
@@ -234,15 +238,17 @@ def apply_lipsync(cinematic_local_path, audio_public_url, clip_name, tmpdir):
         return None
 
 def generate_cinematic_clip(prompt, look_ids, tmpdir, clip_name, reference_urls=None, duration=13):
-    print(f'[Cinematic] Generating: {clip_name}')
+    print(f'[Cinematic] Generating: {clip_name} ({duration}s)')
     look_list = look_ids if isinstance(look_ids, list) else [look_ids]
+    # Clamp to HeyGen limits
+    clamped_duration = max(CINEMATIC_MIN_DURATION, min(int(round(duration)), CINEMATIC_MAX_DURATION))
     payload = {
         'type':           'cinematic_avatar',
         'prompt':         prompt,
         'avatar_id':      look_list,
         'aspect_ratio':   '9:16',
         'resolution':     '720p',
-        'duration':       min(int(duration), 15),
+        'duration':       clamped_duration,
         'enhance_prompt': True,
     }
     if reference_urls:
@@ -406,7 +412,7 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
                         f'and center console. Warm interior lighting, close-up selfie POV.'),
     }
 
-    print('[Build] == CINEMATIC SEGMENTS (with lipsync) ==')
+    print('[Build] == CINEMATIC SEGMENTS (with matched-duration lipsync) ==')
     for seg_name in segment_order:
         seg_text = segments.get(seg_name, '')
         if not seg_text or not seg_text.strip():
@@ -414,6 +420,7 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
 
         print(f'[Build] Segment: {seg_name}')
 
+        # Step 1: Generate TTS audio and measure its duration
         audio_local, audio_pub = generate_tts_audio_url(seg_text, voice_id, tmpdir, seg_name)
         if not audio_pub:
             print(f'[Build] TTS failed for {seg_name}, using presenter fallback')
@@ -424,11 +431,18 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
                 all_clips.append(sc)
             continue
 
+        # Step 2: Measure actual TTS audio duration, use it for cinematic generation
+        # This ensures cinematic clip duration matches audio duration -> lipsync tolerance passes
+        tts_duration = get_audio_duration(audio_local) if audio_local else 13.0
+        cinematic_duration = max(CINEMATIC_MIN_DURATION,
+                                 min(int(round(tts_duration)), CINEMATIC_MAX_DURATION))
+        print(f'[Build] TTS duration={tts_duration:.1f}s -> cinematic target={cinematic_duration}s')
+
         prompt = segment_prompts.get(seg_name, '') + f' Narrating: "{seg_text[:180]}"'
         cinematic_path = generate_cinematic_clip(
             prompt=prompt, look_ids=[WALKAROUND_LOOK],
             tmpdir=tmpdir, clip_name=seg_name,
-            reference_urls=raw_refs, duration=13)
+            reference_urls=raw_refs, duration=cinematic_duration)
 
         if not cinematic_path:
             print(f'[Build] Cinematic failed for {seg_name}, using presenter fallback')
@@ -439,25 +453,34 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
                 all_clips.append(sc)
             continue
 
-        print(f'[Build] Applying lipsync to {seg_name}...')
-        lipsync_path = apply_lipsync(cinematic_path, audio_pub, seg_name, tmpdir)
+        # Step 3: Verify actual cinematic duration before lipsync attempt
+        actual_video_dur = get_audio_duration(cinematic_path)
+        duration_ratio = abs(tts_duration - actual_video_dur) / max(actual_video_dur, 0.1)
+        print(f'[Build] {seg_name}: audio={tts_duration:.1f}s video={actual_video_dur:.1f}s ratio={duration_ratio:.2f}')
 
-        if lipsync_path:
-            print(f'[Build] Lipsync success: {seg_name}')
-            all_clips.append(lipsync_path)
+        if duration_ratio <= 0.15:
+            print(f'[Build] Duration match OK ({duration_ratio:.0%} diff) - applying lipsync...')
+            lipsync_path = apply_lipsync(cinematic_path, audio_pub, seg_name, tmpdir)
+            if lipsync_path:
+                print(f'[Build] Lipsync SUCCESS: {seg_name}')
+                all_clips.append(lipsync_path)
+                continue
+            print(f'[Build] Lipsync API failed for {seg_name}, falling back to mux')
         else:
-            print(f'[Build] Lipsync failed for {seg_name}, muxing cinematic + TTS audio as fallback')
-            if audio_local and os.path.exists(audio_local):
-                mux_out = os.path.join(tmpdir, f'{seg_name}_mux.mp4')
-                cmd = ['ffmpeg', '-y', '-i', cinematic_path, '-i', audio_local,
-                       '-map', '0:v', '-map', '1:a',
-                       '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k',
-                       '-shortest', '-movflags', '+faststart', mux_out]
-                res = subprocess.run(cmd, capture_output=True, timeout=120)
-                if res.returncode == 0 and os.path.exists(mux_out):
-                    all_clips.append(mux_out)
-                    continue
-            all_clips.append(cinematic_path)
+            print(f'[Build] Duration mismatch too large ({duration_ratio:.0%}) - skipping lipsync, muxing directly')
+
+        # Fallback: mux cinematic visuals + TTS audio
+        if audio_local and os.path.exists(audio_local):
+            mux_out = os.path.join(tmpdir, f'{seg_name}_mux.mp4')
+            cmd = ['ffmpeg', '-y', '-i', cinematic_path, '-i', audio_local,
+                   '-map', '0:v', '-map', '1:a',
+                   '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k',
+                   '-shortest', '-movflags', '+faststart', mux_out]
+            res = subprocess.run(cmd, capture_output=True, timeout=120)
+            if res.returncode == 0 and os.path.exists(mux_out):
+                all_clips.append(mux_out)
+                continue
+        all_clips.append(cinematic_path)
 
     if outro_text:
         print('[Build] == OUTRO (presenter) ==')
