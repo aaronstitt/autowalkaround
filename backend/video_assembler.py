@@ -3,13 +3,12 @@ import os, requests, time, subprocess, hashlib
 HEADERS = {'User-Agent': 'Mozilla/5.0'}
 HEYGEN_BASE = 'https://api.heygen.com'
 
-# Tight timeouts: cinematic renders in ~3-5 min, lipsync in ~2-4 min
-CINEMATIC_POLL_INTERVAL = 20 # seconds between polls
-CINEMATIC_POLL_MAX = 18 # max 6 minutes
-LIPSYNC_POLL_INTERVAL = 15 # seconds between polls
-LIPSYNC_POLL_MAX = 20 # max 5 minutes
-PRESENTER_POLL_INTERVAL = 20 # seconds between polls
-PRESENTER_POLL_MAX = 15 # max 5 minutes
+CINEMATIC_POLL_INTERVAL = 20
+CINEMATIC_POLL_MAX = 18
+LIPSYNC_POLL_INTERVAL = 15
+LIPSYNC_POLL_MAX = 20
+PRESENTER_POLL_INTERVAL = 20
+PRESENTER_POLL_MAX = 15
 
 W, H = 1080, 1920
 
@@ -17,10 +16,10 @@ WALKAROUND_LOOK = '346a7a4184ec46b985f92fb380ef007c'
 INTRO_LOOK = 'ed119cc46f5f4a6d8a6687ac187cd779'
 IMMACULATE_LOT_URL = 'https://lh3.googleusercontent.com/gps-cs-s/APNQkAGSkAI7-TAoNkcv4m5PEQRwYfsJdYgypmHTVDUN1Sx4vxRvC13WEcVTnRSkCNWVATeqv7iDe9xxsWWn2VM9ya1BQJEIvTdrY35roeZ3_Sw61Pzeqju1TI0-SlJv2U-qOrKjDKAa=w1333-h1000-k-no'
 
-# HeyGen cinematic max is 15 seconds. Lipsync requires audio/video durations within 15%.
-# We match cinematic duration to actual TTS audio duration to guarantee lipsync passes.
-CINEMATIC_MIN_DURATION = 5   # minimum cinematic clip seconds
-CINEMATIC_MAX_DURATION = 15  # HeyGen hard cap
+CINEMATIC_MIN_DURATION = 5
+CINEMATIC_MAX_DURATION = 15
+# HeyGen lipsync requires durations within 15% - we pad audio to match video exactly
+LIPSYNC_MAX_RATIO = 0.12  # stay under 15% with margin
 
 def heygen_headers():
     return {'x-api-key': os.getenv('HEYGEN_API_KEY'), 'Content-Type': 'application/json'}
@@ -104,6 +103,42 @@ def _cinematic_refs(raw_urls):
         if pub:
             refs.append({'type': 'url', 'url': pub})
     return refs
+
+def pad_audio_to_duration(audio_path, target_duration, tmpdir, clip_name):
+    """Pad audio file with trailing silence to exactly match target_duration seconds.
+    Returns path to padded audio file, or original if padding not needed."""
+    try:
+        audio_dur = get_audio_duration(audio_path)
+        if abs(audio_dur - target_duration) < 0.1:
+            print(f'[Pad] {clip_name}: audio {audio_dur:.2f}s already matches target {target_duration:.2f}s')
+            return audio_path
+        if audio_dur >= target_duration:
+            # Audio is longer than video - trim it slightly under target (98% of target)
+            trim_dur = target_duration * 0.98
+            out = os.path.join(tmpdir, f'trimmed_{clip_name}.mp3')
+            cmd = ['ffmpeg', '-y', '-i', audio_path, '-t', str(trim_dur),
+                   '-c:a', 'libmp3lame', '-q:a', '2', out]
+            res = subprocess.run(cmd, capture_output=True, timeout=60)
+            if res.returncode == 0 and os.path.exists(out):
+                print(f'[Pad] {clip_name}: trimmed {audio_dur:.2f}s -> {trim_dur:.2f}s')
+                return out
+            return audio_path
+        # Audio is shorter - pad with silence to target duration
+        out = os.path.join(tmpdir, f'padded_{clip_name}.mp3')
+        cmd = ['ffmpeg', '-y', '-i', audio_path,
+               '-af', f'apad=pad_dur={target_duration - audio_dur}',
+               '-t', str(target_duration),
+               '-c:a', 'libmp3lame', '-q:a', '2', out]
+        res = subprocess.run(cmd, capture_output=True, timeout=60)
+        if res.returncode == 0 and os.path.exists(out):
+            padded_dur = get_audio_duration(out)
+            print(f'[Pad] {clip_name}: padded {audio_dur:.2f}s -> {padded_dur:.2f}s (target {target_duration:.2f}s)')
+            return out
+        print(f'[Pad] {clip_name}: padding failed, using original')
+        return audio_path
+    except Exception as e:
+        print(f'[Pad] {clip_name}: {e}')
+        return audio_path
 
 def _poll_heygen_video(video_id, clip_name, tmpdir):
     for i in range(PRESENTER_POLL_MAX):
@@ -207,17 +242,43 @@ def generate_tts_audio_url(text, voice_id, tmpdir, clip_name):
         print(f'[TTS] {clip_name}: {e}')
         return None, None
 
-def apply_lipsync(cinematic_local_path, audio_public_url, clip_name, tmpdir):
-    uid          = hashlib.md5(clip_name.encode()).hexdigest()[:12]
-    storage_path = f'lipsync_src/cinematic_{uid}.mp4'
+def apply_lipsync(cinematic_local_path, audio_local_path, clip_name, tmpdir):
+    """Apply lipsync with audio padded to exactly match the cinematic video duration."""
+    # Measure actual cinematic duration
+    video_dur = get_audio_duration(cinematic_local_path)
+    print(f'[Lipsync] {clip_name}: cinematic duration={video_dur:.2f}s')
+
+    # Pad (or trim) audio to match video duration exactly
+    padded_audio_path = pad_audio_to_duration(audio_local_path, video_dur, tmpdir, clip_name)
+
+    # Verify ratio after padding
+    padded_dur = get_audio_duration(padded_audio_path)
+    ratio = abs(padded_dur - video_dur) / max(video_dur, 0.1)
+    print(f'[Lipsync] {clip_name}: after padding audio={padded_dur:.2f}s video={video_dur:.2f}s ratio={ratio:.2%}')
+
+    if ratio > LIPSYNC_MAX_RATIO:
+        print(f'[Lipsync] {clip_name}: ratio {ratio:.2%} still too high after padding, skipping lipsync')
+        return None
+
+    # Upload padded audio to Supabase for HeyGen to fetch
+    uid = hashlib.md5(clip_name.encode()).hexdigest()[:12]
+    padded_storage_path = f'lipsync_audio/padded_{uid}.mp3'
+    padded_pub_url = _upload_file_to_supabase(padded_audio_path, padded_storage_path)
+    if not padded_pub_url:
+        print(f'[Lipsync] {clip_name}: failed to upload padded audio')
+        return None
+
+    # Upload cinematic video for HeyGen lipsync
+    video_storage_path = f'lipsync_src/cinematic_{uid}.mp4'
     print(f'[Lipsync] Uploading cinematic clip for {clip_name}...')
-    video_pub_url = _upload_file_to_supabase(cinematic_local_path, storage_path)
+    video_pub_url = _upload_file_to_supabase(cinematic_local_path, video_storage_path)
     if not video_pub_url:
         print(f'[Lipsync] Could not upload cinematic clip for {clip_name}')
         return None
+
     payload = {
         'video': {'type': 'url', 'url': video_pub_url},
-        'audio': {'type': 'url', 'url': audio_public_url},
+        'audio': {'type': 'url', 'url': padded_pub_url},
         'mode': 'precision',
         'title': f'walkaround_{clip_name}',
     }
@@ -240,7 +301,6 @@ def apply_lipsync(cinematic_local_path, audio_public_url, clip_name, tmpdir):
 def generate_cinematic_clip(prompt, look_ids, tmpdir, clip_name, reference_urls=None, duration=13):
     print(f'[Cinematic] Generating: {clip_name} ({duration}s)')
     look_list = look_ids if isinstance(look_ids, list) else [look_ids]
-    # Clamp to HeyGen limits
     clamped_duration = max(CINEMATIC_MIN_DURATION, min(int(round(duration)), CINEMATIC_MAX_DURATION))
     payload = {
         'type':           'cinematic_avatar',
@@ -412,7 +472,7 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
                         f'and center console. Warm interior lighting, close-up selfie POV.'),
     }
 
-    print('[Build] == CINEMATIC SEGMENTS (with matched-duration lipsync) ==')
+    print('[Build] == CINEMATIC SEGMENTS (with audio-padded lipsync) ==')
     for seg_name in segment_order:
         seg_text = segments.get(seg_name, '')
         if not seg_text or not seg_text.strip():
@@ -420,9 +480,9 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
 
         print(f'[Build] Segment: {seg_name}')
 
-        # Step 1: Generate TTS audio and measure its duration
+        # Step 1: Generate TTS audio
         audio_local, audio_pub = generate_tts_audio_url(seg_text, voice_id, tmpdir, seg_name)
-        if not audio_pub:
+        if not audio_pub or not audio_local:
             print(f'[Build] TTS failed for {seg_name}, using presenter fallback')
             sc = generate_presenter_clip(seg_text, WALKAROUND_LOOK, voice_id, tmpdir, seg_name + '_fb')
             if not sc:
@@ -431,18 +491,15 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
                 all_clips.append(sc)
             continue
 
-        # Step 2: Measure actual TTS audio duration, use it for cinematic generation
-        # This ensures cinematic clip duration matches audio duration -> lipsync tolerance passes
-        tts_duration = get_audio_duration(audio_local) if audio_local else 13.0
-        cinematic_duration = max(CINEMATIC_MIN_DURATION,
-                                 min(int(round(tts_duration)), CINEMATIC_MAX_DURATION))
-        print(f'[Build] TTS duration={tts_duration:.1f}s -> cinematic target={cinematic_duration}s')
+        tts_duration = get_audio_duration(audio_local)
+        print(f'[Build] {seg_name}: TTS duration={tts_duration:.2f}s')
 
+        # Step 2: Generate cinematic clip at 13s (HeyGen minimum)
         prompt = segment_prompts.get(seg_name, '') + f' Narrating: "{seg_text[:180]}"'
         cinematic_path = generate_cinematic_clip(
             prompt=prompt, look_ids=[WALKAROUND_LOOK],
             tmpdir=tmpdir, clip_name=seg_name,
-            reference_urls=raw_refs, duration=cinematic_duration)
+            reference_urls=raw_refs, duration=13)
 
         if not cinematic_path:
             print(f'[Build] Cinematic failed for {seg_name}, using presenter fallback')
@@ -453,23 +510,18 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
                 all_clips.append(sc)
             continue
 
-        # Step 3: Verify actual cinematic duration before lipsync attempt
-        actual_video_dur = get_audio_duration(cinematic_path)
-        duration_ratio = abs(tts_duration - actual_video_dur) / max(actual_video_dur, 0.1)
-        print(f'[Build] {seg_name}: audio={tts_duration:.1f}s video={actual_video_dur:.1f}s ratio={duration_ratio:.2f}')
+        # Step 3: Apply lipsync - pad audio to match actual cinematic duration
+        # pad_audio_to_duration is called inside apply_lipsync
+        print(f'[Build] Applying lipsync to {seg_name} (will pad audio to match video)...')
+        lipsync_path = apply_lipsync(cinematic_path, audio_local, seg_name, tmpdir)
 
-        if duration_ratio <= 0.15:
-            print(f'[Build] Duration match OK ({duration_ratio:.0%} diff) - applying lipsync...')
-            lipsync_path = apply_lipsync(cinematic_path, audio_pub, seg_name, tmpdir)
-            if lipsync_path:
-                print(f'[Build] Lipsync SUCCESS: {seg_name}')
-                all_clips.append(lipsync_path)
-                continue
-            print(f'[Build] Lipsync API failed for {seg_name}, falling back to mux')
-        else:
-            print(f'[Build] Duration mismatch too large ({duration_ratio:.0%}) - skipping lipsync, muxing directly')
+        if lipsync_path:
+            print(f'[Build] Lipsync SUCCESS: {seg_name}')
+            all_clips.append(lipsync_path)
+            continue
 
-        # Fallback: mux cinematic visuals + TTS audio
+        # Fallback: mux cinematic visuals + original TTS audio
+        print(f'[Build] Lipsync failed for {seg_name}, muxing cinematic + TTS audio')
         if audio_local and os.path.exists(audio_local):
             mux_out = os.path.join(tmpdir, f'{seg_name}_mux.mp4')
             cmd = ['ffmpeg', '-y', '-i', cinematic_path, '-i', audio_local,
