@@ -15,6 +15,7 @@ W, H = 1080, 1920
 WALKAROUND_LOOK = '346a7a4184ec46b985f92fb380ef007c'
 INTRO_LOOK = 'ed119cc46f5f4a6d8a6687ac187cd779'
 IMMACULATE_LOT_URL = 'https://lh3.googleusercontent.com/gps-cs-s/APNQkAGSkAI7-TAoNkcv4m5PEQRwYfsJdYgypmHTVDUN1Sx4vxRvC13WEcVTnRSkCNWVATeqv7iDe9xxsWWn2VM9ya1BQJEIvTdrY35roeZ3_Sw61Pzeqju1TI0-SlJv2U-qOrKjDKAa=w1333-h1000-k-no'
+IMMACULATE_LOGO_URL = 'https://pictures.dealer.com/i/immaculateusedcarsut/1234/7c8591524703458ab4071edd3f7ff217.png'
 
 CINEMATIC_MIN_DURATION = 5
 CINEMATIC_MAX_DURATION = 15
@@ -270,16 +271,30 @@ def generate_cinematic_clip(prompt, look_ids, tmpdir, clip_name, reference_urls=
         print(f'[Cinematic] Error: {e}')
         return None
 
-def generate_presenter_clip(text, look_id, voice_id, tmpdir, clip_name):
+def generate_presenter_clip(text, look_id, voice_id, tmpdir, clip_name, background_url=None, motion_prompt=None):
     print(f'[Presenter] Generating: {clip_name}')
     sid = get_starfish_voice_id(voice_id)
     payload = {'type': 'avatar', 'avatar_id': look_id, 'script': text, 'voice_id': sid,
                'resolution': '720p', 'aspect_ratio': '9:16', 'output_format': 'mp4'}
+    if background_url:
+        bg = background_url
+        if ('supabase.co' not in background_url) and ('googleusercontent' not in background_url):
+            bg = _rehost_to_supabase(background_url, 'segment_bg') or None
+        if bg:
+            payload['background'] = {'type': 'image', 'url': bg, 'fit': 'cover'}
+            print(f'[Presenter] {clip_name} background set')
+    if motion_prompt:
+        payload['motion_prompt'] = motion_prompt
     try:
         r = requests.post(HEYGEN_BASE + '/v3/videos', headers=heygen_headers(), json=payload, timeout=60)
         print(f'[Presenter] {clip_name}: {r.status_code} {r.text[:300]}')
         if r.status_code not in (200, 201):
-            return None
+            payload.pop('background', None)
+            payload.pop('motion_prompt', None)
+            r = requests.post(HEYGEN_BASE + '/v3/videos', headers=heygen_headers(), json=payload, timeout=60)
+            print(f'[Presenter] {clip_name} retry-plain: {r.status_code} {r.text[:200]}')
+            if r.status_code not in (200, 201):
+                return None
         video_id = r.json().get('data', {}).get('video_id')
         if not video_id:
             return None
@@ -363,6 +378,28 @@ def compress_video_for_upload(input_path, tmpdir):
         print(f'[Compress] {e}')
         return input_path
 
+def _overlay_logo(video_path, tmpdir):
+    try:
+        logo = os.path.join(tmpdir, 'imm_logo.png')
+        _download_file(IMMACULATE_LOGO_URL, logo)
+        if (not os.path.exists(logo)) or os.path.getsize(logo) < 500:
+            return video_path
+        out = os.path.join(tmpdir, 'final_logo.mp4')
+        fc = '[1:v]scale=210:-1[lg];[0:v][lg]overlay=36:40'
+        cmd = ['ffmpeg', '-y', '-i', video_path, '-i', logo, '-filter_complex', fc,
+               '-c:v', 'libx264', '-preset', 'fast', '-crf', '24', '-c:a', 'copy',
+               '-movflags', '+faststart', out]
+        result = subprocess.run(cmd, capture_output=True, timeout=600)
+        if result.returncode != 0:
+            err = result.stderr[-300:].decode('utf-8', errors='ignore') if result.stderr else ''
+            print(f'[Logo] overlay failed: {err}')
+            return video_path
+        print('[Logo] overlay applied')
+        return out
+    except Exception as e:
+        print(f'[Logo] {e}')
+        return video_path
+
 def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
                            heygen_result, vehicle_photos, vehicle_video_url, tmpdir):
     segments = script_segments if isinstance(script_segments, dict) else {}
@@ -377,103 +414,56 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
     outro_text = segments.get('outro', '')
     segment_order = ['front', 'driver_side', 'rear', 'pass_side', 'interior']
     raw_refs = [IMMACULATE_LOT_URL] + list(vehicle_photos or [])[:2]
+    photos = [p for p in (vehicle_photos or []) if p]
+    def pick(frac):
+        if not photos:
+            return None
+        return photos[min(len(photos) - 1, int(frac * len(photos)))]
+    hero_bg = pick(0.0)
 
     print(f'[Build] Cinematic walkaround with lipsync: {vehicle_name}')
     all_clips = []
 
     if intro_text:
         print('[Build] == INTRO (presenter) ==')
-        ic = generate_presenter_clip(intro_text, INTRO_LOOK, voice_id, tmpdir, 'intro')
+        ic = generate_presenter_clip(intro_text, INTRO_LOOK, voice_id, tmpdir, 'intro', background_url=hero_bg, motion_prompt='Friendly car salesman greeting the camera with a welcoming gesture, standing in front of the vehicle, natural hand movements.')
         if not ic:
             ic = _tts_fallback_clip(intro_text, voice_id, tmpdir, 'intro')
         if ic:
             all_clips.append(ic)
 
-    segment_prompts = {
-        'front': (f'A bald used car salesman in a light blue button-down shirt walks toward '
-                  f'the front of a {vehicle_name} on an Immaculate Used Cars lot. '
-                  f'He holds his iPhone in selfie mode pointed back at himself and the vehicle front, '
-                  f'smiling and gesturing at the hood, grille, and headlights. '
-                  f'Handheld selfie POV, daylight, enthusiastic energy.'),
-        'driver_side': (f'A bald used car salesman in a light blue button-down shirt walks along '
-                        f'the driver side of a {vehicle_name} on an Immaculate Used Cars lot. '
-                        f'He holds his iPhone in selfie mode, turning to point out the doors, '
-                        f'mirrors, and wheels as he strides past. Handheld selfie POV, natural daylight.'),
-        'rear': (f'A bald used car salesman in a light blue button-down shirt stands behind '
-                 f'a {vehicle_name} on an Immaculate Used Cars lot. '
-                 f'He holds his iPhone in selfie mode pointing at himself and the rear of the vehicle, '
-                 f'gesturing at the taillights and hatch. Handheld selfie POV, enthusiastic delivery.'),
-        'pass_side': (f'A bald used car salesman in a light blue button-down shirt walks along '
-                      f'the passenger side of a {vehicle_name} on an Immaculate Used Cars lot. '
-                      f'He holds his iPhone in selfie mode and points to the passenger door and exterior trim. '
-                      f'Handheld selfie POV, natural walking motion.'),
-        'interior': (f'A bald used car salesman in a light blue button-down shirt opens the door '
-                     f'of a {vehicle_name} and leans in, holding his iPhone in selfie mode '
-                     f'to show the dashboard, seats, and interior. He gestures at the steering wheel '
-                     f'and center console. Warm interior lighting, close-up selfie POV.'),
+    print('[Build] == WALKAROUND SEGMENTS (presenter over real vehicle photos) ==')
+    seg_bg = {
+        'front': pick(0.0),
+        'driver_side': pick(0.18),
+        'rear': pick(0.42),
+        'pass_side': pick(0.60),
+        'interior': pick(0.82),
     }
-
-    print('[Build] == CINEMATIC + LIPSYNC SEGMENTS ==')
+    seg_motion = {
+        'front': 'Car salesman gesturing toward the vehicle behind him, presenting the front, grille and headlights, enthusiastic natural hand movements, looking at the camera.',
+        'driver_side': 'Car salesman gesturing to the side toward the vehicle, presenting the driver side and wheels, natural hand movements, looking at the camera.',
+        'rear': 'Car salesman gesturing toward the rear of the vehicle, presenting the back and cargo area, natural hand movements, looking at the camera.',
+        'pass_side': 'Car salesman gesturing toward the passenger side of the vehicle, presenting the doors and trim, natural hand movements, looking at the camera.',
+        'interior': 'Car salesman gesturing toward the vehicle interior, presenting the seats and dashboard, warm enthusiastic hand movements, looking at the camera.',
+    }
     for seg_name in segment_order:
         seg_text = segments.get(seg_name, '')
         if not seg_text or not seg_text.strip():
             continue
-
         print(f'[Build] Segment: {seg_name}')
-
-        # Step 1: Generate TTS audio and upload to Supabase
-        audio_local, audio_pub_url = generate_tts_audio_url(seg_text, voice_id, tmpdir, seg_name)
-        if not audio_pub_url or not audio_local:
-            print(f'[Build] TTS failed for {seg_name}, using presenter fallback')
-            sc = generate_presenter_clip(seg_text, WALKAROUND_LOOK, voice_id, tmpdir, seg_name + '_fb')
-            if not sc:
-                sc = _tts_fallback_clip(seg_text, voice_id, tmpdir, seg_name)
-            if sc:
-                all_clips.append(sc)
-            continue
-
-        # Step 2: Generate cinematic clip (13s visual)
-        prompt = segment_prompts.get(seg_name, '') + f' Narrating: "{seg_text[:180]}"'
-        cinematic_path = generate_cinematic_clip(
-            prompt=prompt, look_ids=[WALKAROUND_LOOK],
-            tmpdir=tmpdir, clip_name=seg_name,
-            reference_urls=raw_refs, duration=13)
-
-        if not cinematic_path:
-            print(f'[Build] Cinematic failed for {seg_name}, using presenter fallback')
-            sc = generate_presenter_clip(seg_text, WALKAROUND_LOOK, voice_id, tmpdir, seg_name + '_fb')
-            if not sc:
-                sc = _tts_fallback_clip(seg_text, voice_id, tmpdir, seg_name)
-            if sc:
-                all_clips.append(sc)
-            continue
-
-        # Step 3: Apply lipsync - HeyGen handles duration matching automatically
-        print(f'[Build] Applying lipsync to {seg_name}...')
-        lipsync_path = apply_lipsync(cinematic_path, audio_pub_url, seg_name, tmpdir)
-
-        if lipsync_path:
-            print(f'[Build] Lipsync SUCCESS: {seg_name}')
-            all_clips.append(lipsync_path)
-            continue
-
-        # Fallback: mux cinematic visuals + TTS audio directly
-        print(f'[Build] Lipsync failed for {seg_name}, muxing cinematic + TTS audio')
-        if audio_local and os.path.exists(audio_local):
-            mux_out = os.path.join(tmpdir, f'{seg_name}_mux.mp4')
-            cmd = ['ffmpeg', '-y', '-i', cinematic_path, '-i', audio_local,
-                   '-map', '0:v', '-map', '1:a',
-                   '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k',
-                   '-shortest', '-movflags', '+faststart', mux_out]
-            res = subprocess.run(cmd, capture_output=True, timeout=120)
-            if res.returncode == 0 and os.path.exists(mux_out):
-                all_clips.append(mux_out)
-                continue
-        all_clips.append(cinematic_path)
-
+        sc = generate_presenter_clip(seg_text, INTRO_LOOK, voice_id, tmpdir, seg_name,
+                                     background_url=seg_bg.get(seg_name),
+                                     motion_prompt=seg_motion.get(seg_name))
+        if not sc:
+            sc = generate_presenter_clip(seg_text, INTRO_LOOK, voice_id, tmpdir, seg_name + '_fb')
+        if not sc:
+            sc = _tts_fallback_clip(seg_text, voice_id, tmpdir, seg_name)
+        if sc:
+            all_clips.append(sc)
     if outro_text:
         print('[Build] == OUTRO (presenter) ==')
-        oc = generate_presenter_clip(outro_text, INTRO_LOOK, voice_id, tmpdir, 'outro')
+        oc = generate_presenter_clip(outro_text, INTRO_LOOK, voice_id, tmpdir, 'outro', background_url=hero_bg, motion_prompt='Car salesman giving a friendly closing call to action with an inviting gesture toward the camera, standing in front of the vehicle.')
         if not oc:
             oc = _tts_fallback_clip(outro_text, voice_id, tmpdir, 'outro')
         if oc:
@@ -486,6 +476,7 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
     else:
         final_path = os.path.join(tmpdir, 'final_walkaround.mp4')
         _concat_clips(all_clips, final_path, tmpdir)
+    final_path = _overlay_logo(final_path, tmpdir)
     return compress_video_for_upload(final_path, tmpdir)
 
 def get_look_id(avatar_group_id):
