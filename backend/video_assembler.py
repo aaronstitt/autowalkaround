@@ -282,6 +282,7 @@ def generate_presenter_clip(text, look_id, voice_id, tmpdir, clip_name, backgrou
             bg = _rehost_to_supabase(background_url, 'segment_bg') or None
         if bg:
             payload['background'] = {'type': 'image', 'url': bg, 'fit': 'cover'}
+            payload['remove_background'] = True
             print(f'[Presenter] {clip_name} background set')
     if motion_prompt:
         payload['motion_prompt'] = motion_prompt
