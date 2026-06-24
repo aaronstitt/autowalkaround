@@ -190,15 +190,36 @@ class FalSampleRequest(BaseModel):
     prompt: Optional[str] = None
 
 
-@router.post('/fal-sample')
-async def fal_sample(req: FalSampleRequest, current_user=Depends(get_current_user)):
+def _run_fal_sample(job_id, image_url, prompt):
+    import tempfile, os as _os
     from video_assembler import fal_image_to_video, _upload_file_to_supabase
-    tmp = tempfile.mkdtemp()
+    try:
+        supabase.table('video_jobs').update({'status': 'assembling', 'status_message': 'fal generating'}).eq('id', job_id).execute()
+        tmp = tempfile.mkdtemp()
+        clip = fal_image_to_video(image_url, prompt, tmp, 'sample')
+        if not clip or not _os.path.exists(clip):
+            supabase.table('video_jobs').update({'status': 'failed', 'status_message': 'fal returned nothing (check FAL_KEY / credits)'}).eq('id', job_id).execute()
+            return
+        pub = _upload_file_to_supabase(clip, 'fal_samples/' + job_id + '.mp4')
+        supabase.table('video_jobs').update({'status': 'completed', 'status_message': 'Video ready!', 'output_url': pub}).eq('id', job_id).execute()
+    except Exception as e:
+        supabase.table('video_jobs').update({'status': 'failed', 'status_message': str(e)[:200]}).eq('id', job_id).execute()
+
+
+@router.post('/fal-sample')
+async def fal_sample(req: FalSampleRequest, background_tasks: BackgroundTasks, current_user=Depends(get_current_user)):
+    user_id = current_user['sub']
+    resp = supabase.table('users').select('dealership_id').eq('id', user_id).single().execute()
+    dealership_id = resp.data.get('dealership_id')
+    job_id = str(uuid.uuid4())
     prompt = req.prompt or ('Smooth cinematic slow orbit around the parked vehicle at a car dealership lot, '
-                            'the camera glides around the car, the vehicle stays exactly the same shape color and details, '
+                            'the camera glides slowly around the car, the vehicle stays exactly the same shape color and details, '
                             'photorealistic, natural daylight, subtle reflections, no people')
-    clip = fal_image_to_video(req.image_url, prompt, tmp, 'sample')
-    if not clip or not os.path.exists(clip):
-        return {'status': 'failed'}
-    pub = _upload_file_to_supabase(clip, 'fal_samples/sample_' + os.path.basename(tmp) + '.mp4')
-    return {'status': 'ok', 'url': pub}
+    supabase.table('video_jobs').insert({
+        'id': job_id, 'user_id': user_id, 'dealership_id': dealership_id,
+        'vehicle_url': req.image_url, 'vehicle_name': 'FAL SAMPLE',
+        'salesperson_id': 'fa5dc22a-03bc-4d21-b47b-09b460eec9fc',
+        'status': 'queued', 'status_message': 'fal queued'
+    }).execute()
+    background_tasks.add_task(_run_fal_sample, job_id, req.image_url, prompt)
+    return {'job_id': job_id, 'status': 'queued'}
