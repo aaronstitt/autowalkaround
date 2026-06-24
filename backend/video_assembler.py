@@ -524,6 +524,65 @@ def _build_pov_insert(vehicle_photos, voice_id, tmpdir):
         print('[POV-insert] %s' % e)
         return None
 
+FAL_KEY = os.getenv('FAL_KEY', '')
+FAL_I2V_MODEL = 'fal-ai/kling-video/v2.1/standard/image-to-video'
+FAL_POLL_INTERVAL = 10
+FAL_POLL_MAX = 72
+
+def fal_image_to_video(image_url, prompt, tmpdir, name, duration='5'):
+    if not FAL_KEY:
+        print('[FAL] FAL_KEY not set; skipping')
+        return None
+    try:
+        hdr = {'Authorization': 'Key ' + FAL_KEY, 'Content-Type': 'application/json'}
+        body = {
+            'prompt': prompt,
+            'image_url': image_url,
+            'duration': duration,
+            'negative_prompt': 'blur, distortion, low quality, deformed car, extra wheels, warped body panels, changed badges, melting, morphing, text artifacts, people',
+            'cfg_scale': 0.5,
+        }
+        sub = requests.post('https://queue.fal.run/' + FAL_I2V_MODEL, headers=hdr, json=body, timeout=60)
+        print('[FAL] submit %s: %s %s' % (name, sub.status_code, sub.text[:200]))
+        if sub.status_code not in (200, 201):
+            return None
+        sj = sub.json()
+        status_url = sj.get('status_url')
+        response_url = sj.get('response_url')
+        if not status_url or not response_url:
+            print('[FAL] missing status/response url: %s' % str(sj)[:200])
+            return None
+        for i in range(FAL_POLL_MAX):
+            time.sleep(FAL_POLL_INTERVAL)
+            try:
+                st = requests.get(status_url, headers=hdr, timeout=30)
+                status = st.json().get('status')
+            except Exception as pe:
+                print('[FAL] poll err: %s' % pe)
+                continue
+            print('[FAL] %s poll %d: %s' % (name, i+1, status))
+            if status == 'COMPLETED':
+                res = requests.get(response_url, headers=hdr, timeout=60)
+                rj = res.json()
+                vurl = (rj.get('video') or {}).get('url')
+                if not vurl:
+                    print('[FAL] no video url: %s' % str(rj)[:200])
+                    return None
+                out = os.path.join(tmpdir, name + '_fal.mp4')
+                _download_file(vurl, out)
+                if os.path.exists(out) and os.path.getsize(out) > 1000:
+                    print('[FAL] %s done: %s' % (name, vurl))
+                    return out
+                return None
+            if status in ('FAILED', 'ERROR', 'CANCELLED'):
+                print('[FAL] %s failed: %s' % (name, st.text[:200]))
+                return None
+        print('[FAL] %s timed out' % name)
+        return None
+    except Exception as e:
+        print('[FAL] exc: %s' % e)
+        return None
+
 def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
                            heygen_result, vehicle_photos, vehicle_video_url, tmpdir):
     segments = script_segments if isinstance(script_segments, dict) else {}
