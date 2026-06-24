@@ -427,7 +427,7 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
 
     if intro_text:
         print('[Build] == INTRO (presenter) ==')
-        ic = generate_presenter_clip(intro_text, INTRO_LOOK, voice_id, tmpdir, 'intro', background_url=hero_bg, motion_prompt='Friendly car salesman greeting the camera with a welcoming gesture, standing in front of the vehicle, natural hand movements.')
+        ic = generate_presenter_clip(intro_text, INTRO_LOOK, voice_id, tmpdir, 'intro', motion_prompt='Friendly car salesman greeting the camera with a welcoming gesture at the used car lot, natural hand movements.')
         if not ic:
             ic = _tts_fallback_clip(intro_text, voice_id, tmpdir, 'intro')
         if ic:
@@ -464,7 +464,7 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
             all_clips.append(sc)
     if outro_text:
         print('[Build] == OUTRO (presenter) ==')
-        oc = generate_presenter_clip(outro_text, INTRO_LOOK, voice_id, tmpdir, 'outro', background_url=hero_bg, motion_prompt='Car salesman giving a friendly closing call to action with an inviting gesture toward the camera, standing in front of the vehicle.')
+        oc = generate_presenter_clip(outro_text, INTRO_LOOK, voice_id, tmpdir, 'outro', motion_prompt='Car salesman giving a friendly closing call to action with an inviting gesture toward the camera at the used car lot.')
         if not oc:
             oc = _tts_fallback_clip(outro_text, voice_id, tmpdir, 'outro')
         if oc:
