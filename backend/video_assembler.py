@@ -401,6 +401,97 @@ def _overlay_logo(video_path, tmpdir):
         print(f'[Logo] {e}')
         return video_path
 
+def _pov_pan_clip(photo_local, dur, out):
+    try:
+        dur = max(2.0, min(float(dur), 14.0))
+        vf = ("scale=720:1320:force_original_aspect_ratio=increase,"
+              "crop=720:1280:x='(in_w-720)*(t/%.3f)':y='(in_h-1280)*0.5+8*sin(2.2*t)',"
+              "fps=25,format=yuv420p,setsar=1") % dur
+        cmd = ['ffmpeg', '-y', '-loop', '1', '-t', '%.3f' % dur, '-i', photo_local,
+               '-filter_complex', '[0:v]' + vf + '[v]', '-map', '[v]', '-an',
+               '-c:v', 'libx264', '-preset', 'fast', '-crf', '24', '-pix_fmt', 'yuv420p', out]
+        r = subprocess.run(cmd, capture_output=True, timeout=300)
+        if r.returncode != 0:
+            print('[POV] pan fail: ' + (r.stderr[-200:].decode('utf-8', 'ignore') if r.stderr else ''))
+            return None
+        return out
+    except Exception as e:
+        print('[POV] pan exc: %s' % e)
+        return None
+
+def _xfade_chain(clips, out):
+    try:
+        if not clips:
+            return None
+        if len(clips) == 1:
+            return clips[0]
+        durs = [get_audio_duration(c) for c in clips]
+        inputs = []
+        for c in clips:
+            inputs += ['-i', c]
+        d = 0.5
+        filt = ''
+        prev = '[0:v]'
+        offset = 0.0
+        for i in range(1, len(clips)):
+            offset += durs[i-1] - d
+            lbl = '[v]' if i == len(clips) - 1 else '[x%d]' % i
+            filt += '%s[%d:v]xfade=transition=slideleft:duration=%.3f:offset=%.3f%s;' % (prev, i, d, offset, lbl)
+            prev = '[x%d]' % i
+        filt = filt.rstrip(';')
+        cmd = ['ffmpeg', '-y'] + inputs + ['-filter_complex', filt, '-map', '[v]',
+               '-c:v', 'libx264', '-preset', 'fast', '-crf', '23', '-pix_fmt', 'yuv420p', out]
+        r = subprocess.run(cmd, capture_output=True, timeout=600)
+        if r.returncode != 0:
+            print('[POV] xfade fail: ' + (r.stderr[-300:].decode('utf-8', 'ignore') if r.stderr else ''))
+            return None
+        return out
+    except Exception as e:
+        print('[POV] xfade exc: %s' % e)
+        return None
+
+def _concat_audio(audio_paths, out, tmpdir):
+    try:
+        lst = os.path.join(tmpdir, 'narr_list.txt')
+        with open(lst, 'w') as f:
+            for a in audio_paths:
+                f.write("file '%s'\n" % a)
+        cmd = ['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', lst,
+               '-c:a', 'aac', '-b:a', '128k', '-ar', '44100', out]
+        r = subprocess.run(cmd, capture_output=True, timeout=300)
+        if r.returncode != 0:
+            print('[POV] audio concat fail')
+            return None
+        return out
+    except Exception as e:
+        print('[POV] audio concat exc: %s' % e)
+        return None
+
+def _mux_av(video, audio, out):
+    try:
+        cmd = ['ffmpeg', '-y', '-i', video, '-i', audio, '-map', '0:v', '-map', '1:a',
+               '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k', '-ar', '44100',
+               '-shortest', '-movflags', '+faststart', out]
+        r = subprocess.run(cmd, capture_output=True, timeout=300)
+        return out if r.returncode == 0 else None
+    except Exception as e:
+        print('[POV] mux exc: %s' % e)
+        return None
+
+def _normalize_clip(src, out):
+    try:
+        vf = ('scale=720:1280:force_original_aspect_ratio=decrease,'
+              'pad=720:1280:(ow-iw)/2:(oh-ih)/2,fps=25,format=yuv420p,setsar=1')
+        cmd = ['ffmpeg', '-y', '-i', src, '-vf', vf,
+               '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+               '-c:a', 'aac', '-b:a', '128k', '-ar', '44100',
+               '-movflags', '+faststart', out]
+        r = subprocess.run(cmd, capture_output=True, timeout=300)
+        return out if r.returncode == 0 else src
+    except Exception as e:
+        print('[POV] normalize exc: %s' % e)
+        return src
+
 def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
                            heygen_result, vehicle_photos, vehicle_video_url, tmpdir):
     segments = script_segments if isinstance(script_segments, dict) else {}
@@ -433,38 +524,65 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
         if ic:
             all_clips.append(ic)
 
-    print('[Build] == WALKAROUND SEGMENTS (presenter over real vehicle photos) ==')
-    seg_bg = {
+    print('[Build] == POV WALKAROUND (orbit around the real vehicle) ==')
+    seg_photo = {
         'front': pick(0.0),
         'driver_side': pick(0.18),
         'rear': pick(0.42),
         'pass_side': pick(0.60),
         'interior': pick(0.82),
     }
-    seg_motion = {
-        'front': 'Car salesman gesturing toward the vehicle behind him, presenting the front, grille and headlights, enthusiastic natural hand movements, looking at the camera.',
-        'driver_side': 'Car salesman gesturing to the side toward the vehicle, presenting the driver side and wheels, natural hand movements, looking at the camera.',
-        'rear': 'Car salesman gesturing toward the rear of the vehicle, presenting the back and cargo area, natural hand movements, looking at the camera.',
-        'pass_side': 'Car salesman gesturing toward the passenger side of the vehicle, presenting the doors and trim, natural hand movements, looking at the camera.',
-        'interior': 'Car salesman gesturing toward the vehicle interior, presenting the seats and dashboard, warm enthusiastic hand movements, looking at the camera.',
-    }
+    pov_clips = []
+    pov_audios = []
+    pov_i = 0
     for seg_name in segment_order:
         seg_text = segments.get(seg_name, '')
         if not seg_text or not seg_text.strip():
             continue
-        print(f'[Build] Segment: {seg_name}')
-        sc = generate_presenter_clip(seg_text, INTRO_LOOK, voice_id, tmpdir, seg_name,
-                                     background_url=seg_bg.get(seg_name),
-                                     motion_prompt=seg_motion.get(seg_name))
-        if not sc:
-            sc = generate_presenter_clip(seg_text, INTRO_LOOK, voice_id, tmpdir, seg_name + '_fb')
-        if not sc:
-            sc = _tts_fallback_clip(seg_text, voice_id, tmpdir, seg_name)
-        if sc:
-            all_clips.append(sc)
+        photo_url = seg_photo.get(seg_name)
+        if not photo_url:
+            continue
+        audio_local, _ap = generate_tts_audio_url(seg_text, voice_id, tmpdir, 'pov_' + seg_name)
+        if not audio_local:
+            continue
+        photo_local = os.path.join(tmpdir, 'povphoto_%d.jpg' % pov_i)
+        _download_file(photo_url, photo_local)
+        if (not os.path.exists(photo_local)) or os.path.getsize(photo_local) < 1000:
+            continue
+        seg_dur = get_audio_duration(audio_local)
+        pan = _pov_pan_clip(photo_local, seg_dur + 0.6, os.path.join(tmpdir, 'povpan_%d.mp4' % pov_i))
+        if not pan:
+            continue
+        print('[POV] segment %s ready (%.1fs)' % (seg_name, seg_dur))
+        pov_clips.append(pan)
+        pov_audios.append(audio_local)
+        pov_i += 1
+
+    if pov_clips:
+        orbit_v = _xfade_chain(pov_clips, os.path.join(tmpdir, 'pov_orbit.mp4'))
+        narration = _concat_audio(pov_audios, os.path.join(tmpdir, 'pov_narration.m4a'), tmpdir)
+        if orbit_v and narration:
+            mid = _mux_av(orbit_v, narration, os.path.join(tmpdir, 'pov_middle.mp4'))
+            if mid:
+                all_clips.append(mid)
+                print('[Build] POV middle added')
+    else:
+        print('[Build] POV middle produced no segments')
+
     if outro_text:
-        print('[Build] == OUTRO (presenter) ==')
-        oc = generate_presenter_clip(outro_text, INTRO_LOOK, voice_id, tmpdir, 'outro', motion_prompt='Car salesman giving a friendly closing call to action with an inviting gesture toward the camera at the used car lot.')
+        print('[Build] == POV OUTRO ==')
+        oc = None
+        oaudio, _op = generate_tts_audio_url(outro_text, voice_id, tmpdir, 'pov_outro')
+        hero = pick(0.0)
+        if oaudio and hero:
+            ophoto = os.path.join(tmpdir, 'povphoto_outro.jpg')
+            _download_file(hero, ophoto)
+            if os.path.exists(ophoto) and os.path.getsize(ophoto) > 1000:
+                opan = _pov_pan_clip(ophoto, get_audio_duration(oaudio), os.path.join(tmpdir, 'povpan_outro.mp4'))
+                if opan:
+                    oc = _mux_av(opan, oaudio, os.path.join(tmpdir, 'pov_outro.mp4'))
+        if not oc:
+            oc = generate_presenter_clip(outro_text, INTRO_LOOK, voice_id, tmpdir, 'outro')
         if not oc:
             oc = _tts_fallback_clip(outro_text, voice_id, tmpdir, 'outro')
         if oc:
@@ -472,11 +590,14 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
 
     if not all_clips:
         raise RuntimeError('No clips built')
-    if len(all_clips) == 1:
-        final_path = all_clips[0]
+    norm_clips = []
+    for idx, c in enumerate(all_clips):
+        norm_clips.append(_normalize_clip(c, os.path.join(tmpdir, 'norm_%d.mp4' % idx)))
+    if len(norm_clips) == 1:
+        final_path = norm_clips[0]
     else:
         final_path = os.path.join(tmpdir, 'final_walkaround.mp4')
-        _concat_clips(all_clips, final_path, tmpdir)
+        _concat_clips(norm_clips, final_path, tmpdir)
     final_path = _overlay_logo(final_path, tmpdir)
     return compress_video_for_upload(final_path, tmpdir)
 
