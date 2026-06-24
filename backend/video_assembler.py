@@ -492,6 +492,38 @@ def _normalize_clip(src, out):
         print('[POV] normalize exc: %s' % e)
         return src
 
+def _build_pov_insert(vehicle_photos, voice_id, tmpdir):
+    try:
+        photos = [p for p in (vehicle_photos or []) if p]
+        if not photos:
+            return None
+        line = 'Let me give you a quick look around her.'
+        audio_local, _a = generate_tts_audio_url(line, voice_id, tmpdir, 'pov_insert')
+        if not audio_local:
+            return None
+        total = get_audio_duration(audio_local)
+        idxs = [0, len(photos)//3, (2*len(photos))//3]
+        sel = [photos[min(len(photos)-1, fi)] for fi in idxs]
+        per = max(2.0, (total + (len(sel)-1)*0.5)/len(sel))
+        clips = []
+        for k, url in enumerate(sel):
+            pl = os.path.join(tmpdir, 'povins_%d.jpg' % k)
+            _download_file(url, pl)
+            if (not os.path.exists(pl)) or os.path.getsize(pl) < 1000:
+                continue
+            pc = _pov_pan_clip(pl, per + 0.6, os.path.join(tmpdir, 'povinsclip_%d.mp4' % k))
+            if pc:
+                clips.append(pc)
+        if not clips:
+            return None
+        orbit = _xfade_chain(clips, os.path.join(tmpdir, 'pov_insert_orbit.mp4'))
+        if not orbit:
+            return None
+        return _mux_av(orbit, audio_local, os.path.join(tmpdir, 'pov_insert.mp4'))
+    except Exception as e:
+        print('[POV-insert] %s' % e)
+        return None
+
 def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
                            heygen_result, vehicle_photos, vehicle_video_url, tmpdir):
     segments = script_segments if isinstance(script_segments, dict) else {}
@@ -524,65 +556,47 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
         if ic:
             all_clips.append(ic)
 
-    print('[Build] == POV WALKAROUND (orbit around the real vehicle) ==')
-    seg_photo = {
+    print('[Build] == HYBRID: on-camera feature segments + one POV insert ==')
+    seg_bg = {
         'front': pick(0.0),
         'driver_side': pick(0.18),
         'rear': pick(0.42),
         'pass_side': pick(0.60),
         'interior': pick(0.82),
     }
-    pov_clips = []
-    pov_audios = []
-    pov_i = 0
+    seg_motion = {
+        'front': 'Car salesman gesturing toward the vehicle behind him, presenting the front, grille and headlights, enthusiastic natural hand movements, looking at the camera.',
+        'driver_side': 'Car salesman gesturing to the side toward the vehicle, presenting the driver side and wheels, natural hand movements, looking at the camera.',
+        'rear': 'Car salesman gesturing toward the rear of the vehicle, presenting the back and cargo area, natural hand movements, looking at the camera.',
+        'pass_side': 'Car salesman gesturing toward the passenger side of the vehicle, presenting the doors and trim, natural hand movements, looking at the camera.',
+        'interior': 'Car salesman gesturing toward the vehicle interior, presenting the seats and dashboard, warm enthusiastic hand movements, looking at the camera.',
+    }
+    pov_inserted = False
     for seg_name in segment_order:
         seg_text = segments.get(seg_name, '')
         if not seg_text or not seg_text.strip():
             continue
-        photo_url = seg_photo.get(seg_name)
-        if not photo_url:
-            continue
-        audio_local, _ap = generate_tts_audio_url(seg_text, voice_id, tmpdir, 'pov_' + seg_name)
-        if not audio_local:
-            continue
-        photo_local = os.path.join(tmpdir, 'povphoto_%d.jpg' % pov_i)
-        _download_file(photo_url, photo_local)
-        if (not os.path.exists(photo_local)) or os.path.getsize(photo_local) < 1000:
-            continue
-        seg_dur = get_audio_duration(audio_local)
-        pan = _pov_pan_clip(photo_local, seg_dur + 0.6, os.path.join(tmpdir, 'povpan_%d.mp4' % pov_i))
-        if not pan:
-            continue
-        print('[POV] segment %s ready (%.1fs)' % (seg_name, seg_dur))
-        pov_clips.append(pan)
-        pov_audios.append(audio_local)
-        pov_i += 1
-
-    if pov_clips:
-        orbit_v = _xfade_chain(pov_clips, os.path.join(tmpdir, 'pov_orbit.mp4'))
-        narration = _concat_audio(pov_audios, os.path.join(tmpdir, 'pov_narration.m4a'), tmpdir)
-        if orbit_v and narration:
-            mid = _mux_av(orbit_v, narration, os.path.join(tmpdir, 'pov_middle.mp4'))
-            if mid:
-                all_clips.append(mid)
-                print('[Build] POV middle added')
-    else:
-        print('[Build] POV middle produced no segments')
+        print('[Build] On-camera segment: %s' % seg_name)
+        sc = generate_presenter_clip(seg_text, INTRO_LOOK, voice_id, tmpdir, seg_name,
+                                     background_url=seg_bg.get(seg_name),
+                                     motion_prompt=seg_motion.get(seg_name))
+        if not sc:
+            sc = generate_presenter_clip(seg_text, INTRO_LOOK, voice_id, tmpdir, seg_name + '_fb')
+        if not sc:
+            sc = _tts_fallback_clip(seg_text, voice_id, tmpdir, seg_name)
+        if sc:
+            all_clips.append(sc)
+        if seg_name == 'driver_side' and not pov_inserted:
+            pov_inserted = True
+            print('[Build] inserting brief POV pass')
+            pov = _build_pov_insert(vehicle_photos, voice_id, tmpdir)
+            if pov:
+                all_clips.append(pov)
+                print('[Build] POV insert added')
 
     if outro_text:
-        print('[Build] == POV OUTRO ==')
-        oc = None
-        oaudio, _op = generate_tts_audio_url(outro_text, voice_id, tmpdir, 'pov_outro')
-        hero = pick(0.0)
-        if oaudio and hero:
-            ophoto = os.path.join(tmpdir, 'povphoto_outro.jpg')
-            _download_file(hero, ophoto)
-            if os.path.exists(ophoto) and os.path.getsize(ophoto) > 1000:
-                opan = _pov_pan_clip(ophoto, get_audio_duration(oaudio), os.path.join(tmpdir, 'povpan_outro.mp4'))
-                if opan:
-                    oc = _mux_av(opan, oaudio, os.path.join(tmpdir, 'pov_outro.mp4'))
-        if not oc:
-            oc = generate_presenter_clip(outro_text, INTRO_LOOK, voice_id, tmpdir, 'outro')
+        print('[Build] == OUTRO (on-camera selfie, lot) ==')
+        oc = generate_presenter_clip(outro_text, INTRO_LOOK, voice_id, tmpdir, 'outro')
         if not oc:
             oc = _tts_fallback_clip(outro_text, voice_id, tmpdir, 'outro')
         if oc:
