@@ -183,3 +183,22 @@ async def _run_pipeline(job_id, vehicle_url, salesperson_id, dealership_id, page
             shutil.rmtree(tmpdir, ignore_errors=True)
         except Exception:
             pass
+
+
+class FalSampleRequest(BaseModel):
+    image_url: str
+    prompt: Optional[str] = None
+
+
+@router.post('/fal-sample')
+async def fal_sample(req: FalSampleRequest, current_user=Depends(get_current_user)):
+    from video_assembler import fal_image_to_video, _upload_file_to_supabase
+    tmp = tempfile.mkdtemp()
+    prompt = req.prompt or ('Smooth cinematic slow orbit around the parked vehicle at a car dealership lot, '
+                            'the camera glides around the car, the vehicle stays exactly the same shape color and details, '
+                            'photorealistic, natural daylight, subtle reflections, no people')
+    clip = fal_image_to_video(req.image_url, prompt, tmp, 'sample')
+    if not clip or not os.path.exists(clip):
+        return {'status': 'failed'}
+    pub = _upload_file_to_supabase(clip, 'fal_samples/sample_' + os.path.basename(tmp) + '.mp4')
+    return {'status': 'ok', 'url': pub}
