@@ -583,6 +583,75 @@ def fal_image_to_video(image_url, prompt, tmpdir, name, duration='5'):
         print('[FAL] exc: %s' % e)
         return None
 
+def _ffrun(cmd, timeout=600):
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=timeout)
+        if r.returncode != 0:
+            print('[ff] fail: ' + (r.stderr[-200:].decode('utf-8', 'ignore') if r.stderr else ''))
+            return False
+        return True
+    except Exception as e:
+        print('[ff] exc: %s' % e)
+        return False
+
+def _fal_prep_photo(photo_url, tmpdir, name):
+    try:
+        local = os.path.join(tmpdir, 'falsrc_%s.jpg' % name)
+        _download_file(photo_url, local)
+        if (not os.path.exists(local)) or os.path.getsize(local) < 1000:
+            return None
+        cropped = os.path.join(tmpdir, 'falcrop_%s.jpg' % name)
+        if not _ffrun(['ffmpeg', '-y', '-i', local, '-vf', 'crop=iw:ih*0.85:0:ih*0.15', '-q:v', '2', cropped]):
+            cropped = local
+        pub = _upload_file_to_supabase(cropped, 'fal_src/%s_%s.jpg' % (name, hashlib.md5(photo_url.encode()).hexdigest()[:8]))
+        return pub
+    except Exception as e:
+        print('[FAL-prep] %s' % e)
+        return None
+
+def _blurfill_916(clip_in, out):
+    fc = ('[0:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,gblur=sigma=22,eq=brightness=-0.06[bg];'
+          '[0:v]scale=720:-2[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuv420p[v]')
+    if _ffrun(['ffmpeg', '-y', '-i', clip_in, '-filter_complex', fc, '-map', '[v]', '-an',
+               '-c:v', 'libx264', '-preset', 'fast', '-crf', '22', out]):
+        return out
+    return None
+
+def _segment_with_voice(video_in, audio_local, out, tmpdir, name):
+    try:
+        vdur = get_audio_duration(video_in)
+        adur = get_audio_duration(audio_local)
+        vsrc = video_in
+        if adur > vdur + 0.15:
+            ext = os.path.join(tmpdir, 'ext_%s.mp4' % name)
+            if _ffrun(['ffmpeg', '-y', '-i', video_in, '-vf', 'tpad=stop_mode=clone:stop_duration=%.2f' % (adur - vdur),
+                       '-c:v', 'libx264', '-preset', 'fast', '-crf', '22', ext]):
+                vsrc = ext
+        if not _ffrun(['ffmpeg', '-y', '-i', vsrc, '-i', audio_local, '-map', '0:v', '-map', '1:a',
+                       '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k', '-ar', '44100', '-movflags', '+faststart', out]):
+            return None
+        return out
+    except Exception as e:
+        print('[seg-voice] %s' % e)
+        return None
+
+def _fal_vehicle_segment(photo_url, fal_prompt, narration_text, voice_id, tmpdir, name, duration='10'):
+    pub = _fal_prep_photo(photo_url, tmpdir, name)
+    if not pub:
+        print('[FAL-seg] %s: no usable photo' % name)
+        return None
+    clip = fal_image_to_video(pub, fal_prompt, tmpdir, name, duration=duration)
+    if not clip:
+        return None
+    bf = _blurfill_916(clip, os.path.join(tmpdir, 'bf_%s.mp4' % name))
+    if not bf:
+        return None
+    audio_local, _a = generate_tts_audio_url(narration_text, voice_id, tmpdir, 'fal_' + name)
+    if not audio_local:
+        return bf
+    seg = _segment_with_voice(bf, audio_local, os.path.join(tmpdir, 'falseg_%s.mp4' % name), tmpdir, name)
+    return seg or bf
+
 def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
                            heygen_result, vehicle_photos, vehicle_video_url, tmpdir):
     segments = script_segments if isinstance(script_segments, dict) else {}
@@ -615,43 +684,34 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
         if ic:
             all_clips.append(ic)
 
-    print('[Build] == HYBRID: on-camera feature segments + one POV insert ==')
-    seg_bg = {
-        'front': pick(0.0),
-        'driver_side': pick(0.18),
-        'rear': pick(0.42),
-        'pass_side': pick(0.60),
-        'interior': pick(0.82),
-    }
-    seg_motion = {
-        'front': 'Car salesman gesturing toward the vehicle behind him, presenting the front, grille and headlights, enthusiastic natural hand movements, looking at the camera.',
-        'driver_side': 'Car salesman gesturing to the side toward the vehicle, presenting the driver side and wheels, natural hand movements, looking at the camera.',
-        'rear': 'Car salesman gesturing toward the rear of the vehicle, presenting the back and cargo area, natural hand movements, looking at the camera.',
-        'pass_side': 'Car salesman gesturing toward the passenger side of the vehicle, presenting the doors and trim, natural hand movements, looking at the camera.',
-        'interior': 'Car salesman gesturing toward the vehicle interior, presenting the seats and dashboard, warm enthusiastic hand movements, looking at the camera.',
-    }
-    pov_inserted = False
-    for seg_name in segment_order:
+    print('[Build] == FAL VEHICLE SHOWCASE (photoreal image-to-video) ==')
+    veh_segments = [
+        ('front', pick(0.0), 'Smooth cinematic slow orbit around the front of the parked %s, the camera glides around revealing the front and side, the vehicle stays exactly the same shape color and details, photorealistic, natural daylight, no people, no text overlays' % vehicle_name),
+        ('driver_side', pick(0.20), 'Cinematic slow camera glide along the driver side of the parked %s showing the doors and wheels, the vehicle stays exactly the same, photorealistic, no people, no text overlays' % vehicle_name),
+        ('rear', pick(0.45), 'Smooth cinematic orbit around the rear of the parked %s showing the back and tail lights, the vehicle stays exactly the same, photorealistic, no people, no text overlays' % vehicle_name),
+        ('interior', pick(0.85), 'Slow cinematic camera move through the interior of the %s showing the dashboard, steering wheel and seats, the interior stays exactly the same, photorealistic, no people, no text overlays' % vehicle_name),
+    ]
+    for seg_name, photo_url, fal_prompt in veh_segments:
+        if not photo_url:
+            continue
         seg_text = segments.get(seg_name, '')
         if not seg_text or not seg_text.strip():
-            continue
-        print('[Build] On-camera segment: %s' % seg_name)
-        sc = generate_presenter_clip(seg_text, INTRO_LOOK, voice_id, tmpdir, seg_name,
-                                     background_url=seg_bg.get(seg_name),
-                                     motion_prompt=seg_motion.get(seg_name))
-        if not sc:
-            sc = generate_presenter_clip(seg_text, INTRO_LOOK, voice_id, tmpdir, seg_name + '_fb')
-        if not sc:
-            sc = _tts_fallback_clip(seg_text, voice_id, tmpdir, seg_name)
-        if sc:
-            all_clips.append(sc)
-        if seg_name == 'driver_side' and not pov_inserted:
-            pov_inserted = True
-            print('[Build] inserting brief POV pass')
-            pov = _build_pov_insert(vehicle_photos, voice_id, tmpdir)
-            if pov:
-                all_clips.append(pov)
-                print('[Build] POV insert added')
+            seg_text = 'Check out the %s here at Immaculate Used Cars.' % vehicle_name
+        print('[Build] FAL segment: %s' % seg_name)
+        dur = '5' if seg_name == 'interior' else '10'
+        seg = _fal_vehicle_segment(photo_url, fal_prompt, seg_text, voice_id, tmpdir, seg_name, duration=dur)
+        if not seg:
+            print('[Build] FAL failed for %s, falling back to pan' % seg_name)
+            audio_local, _a = generate_tts_audio_url(seg_text, voice_id, tmpdir, 'fb_' + seg_name)
+            if audio_local:
+                pl = os.path.join(tmpdir, 'fbphoto_%s.jpg' % seg_name)
+                _download_file(photo_url, pl)
+                if os.path.exists(pl) and os.path.getsize(pl) > 1000:
+                    pan = _pov_pan_clip(pl, get_audio_duration(audio_local) + 0.4, os.path.join(tmpdir, 'fbpan_%s.mp4' % seg_name))
+                    if pan:
+                        seg = _mux_av(pan, audio_local, os.path.join(tmpdir, 'fbseg_%s.mp4' % seg_name))
+        if seg:
+            all_clips.append(seg)
 
     if outro_text:
         print('[Build] == OUTRO (on-camera selfie, lot) ==')
@@ -660,7 +720,6 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
             oc = _tts_fallback_clip(outro_text, voice_id, tmpdir, 'outro')
         if oc:
             all_clips.append(oc)
-
     if not all_clips:
         raise RuntimeError('No clips built')
     norm_clips = []
