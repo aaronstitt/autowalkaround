@@ -685,11 +685,13 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
             all_clips.append(ic)
 
     print('[Build] == FAL VEHICLE SHOWCASE (photoreal image-to-video) ==')
+    _np = len(photos)
+    def _vp(i):
+        return photos[min(i, _np - 1)] if _np else None
     veh_segments = [
-        ('front', pick(0.0), 'Smooth cinematic slow orbit around the front of the parked %s, the camera glides around revealing the front and side, the vehicle stays exactly the same shape color and details, photorealistic, natural daylight, no people, no text overlays' % vehicle_name),
-        ('driver_side', pick(0.20), 'Cinematic slow camera glide along the driver side of the parked %s showing the doors and wheels, the vehicle stays exactly the same, photorealistic, no people, no text overlays' % vehicle_name),
-        ('rear', pick(0.45), 'Smooth cinematic orbit around the rear of the parked %s showing the back and tail lights, the vehicle stays exactly the same, photorealistic, no people, no text overlays' % vehicle_name),
-        ('interior', pick(0.85), 'Slow cinematic camera move through the interior of the %s showing the dashboard, steering wheel and seats, the interior stays exactly the same, photorealistic, no people, no text overlays' % vehicle_name),
+        ('front', _vp(0), 'Smooth cinematic slow orbit around the parked %s, the camera glides around revealing the front and side, the vehicle stays exactly the same shape color and details, photorealistic, natural daylight, no people, no text overlays' % vehicle_name),
+        ('driver_side', _vp(2), 'Cinematic slow camera glide around the parked %s showing the side profile and the wheels, the vehicle stays exactly the same, photorealistic, no people, no text overlays' % vehicle_name),
+        ('rear', _vp(4), 'Smooth cinematic orbit around the parked %s revealing more of the body and the rear, the vehicle stays exactly the same, photorealistic, no people, no text overlays' % vehicle_name),
     ]
     for seg_name, photo_url, fal_prompt in veh_segments:
         if not photo_url:
