@@ -4,7 +4,7 @@ import json
 
 client = openai.OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 
-# ──────────────────────────────────────────────
+# ââââââââââââââââââââââââââââââââââââââââââââââ
 # SEGMENTED walkaround script - each segment maps to a camera position
 # Order mirrors walkaround v4.mov:
 # intro -> selfie face-cam: salesperson intro
@@ -14,7 +14,7 @@ client = openai.OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 # pass_side -> passenger side
 # interior -> inside vehicle
 # outro -> closing, price, CTA
-# ──────────────────────────────────────────────
+# ââââââââââââââââââââââââââââââââââââââââââââââ
 
 SYSTEM_PROMPT = """You are an expert automotive walkaround video scriptwriter.
 You write scripts for a salesperson physically walking a phone camera around a vehicle.
@@ -44,6 +44,13 @@ CRITICAL LENGTH REQUIREMENT:
 - Intro: 25-35 words. Outro: 20-28 words.
 - Count your words carefully before returning the JSON.
 
+WALKAROUND FLOW (most important rule):
+- The middle plays as ONE continuous walk around the vehicle, in this physical order: FRONT, then DRIVER_SIDE, then REAR, then PASS_SIDE, then INTERIOR.
+- Talk about each feature WHERE IT PHYSICALLY IS as you reach it. Exterior features first, interior features last.
+- Use natural walking transitions: "up front here", "coming around the driver side", "let's head around back", "over on the passenger side", "now let's hop inside", "and back here in the rear".
+- INTERIOR segment: cover dashboard and front controls FIRST (screen, audio controls, climate, mirror), THEN rear-cabin and cargo (rear seats, folding seats, rear A/C), as if panning from the dash to the back.
+- Never claim a feature is somewhere it is not. Headlights and grille are up front; backup camera, wiper and liftgate are at the rear; seats, screen, climate and controls are inside.
+
 Return ONLY valid JSON with exactly these keys:
 intro, front, driver_side, rear, pass_side, interior, outro, full_script, word_count"""
 
@@ -61,16 +68,29 @@ def generate_walkaround_script(vehicle, salesperson_name, dealer_name='Immaculat
     highlighted = vehicle.get('highlighted_features', [])
 
     # Categorize features by camera position
-    front_kw = ['headlight', 'fog light', 'approach light', 'bumper', 'hood', 'grille', 'front fog', 'delay-off']
-    rear_kw = ['camera', 'backup', 'rear window wiper', 'liftgate', 'spoiler', 'parkview', 'rear window', 'back-up']
-    driver_kw = ['mirror', 'keyless entry', 'perimeter', 'remote keyless', 'auto-dimming']
-    side_kw = ['wheel', 'alloy', 'molding', 'belt molding', 'rack', 'roof rack', 'crossbar', 'touring suspension']
-    interior_kw = ['seat', 'leather', 'audio', 'screen', 'display', 'climate', 'air conditioning',
-                   'wireless', 'navigation', 'steering wheel', 'folding', 'cargo', 'armrest',
-                   'heated', 'sunroof', 'moonroof', 'touchscreen', 'phone', 'connectivity',
-                   'carplay', 'android', 'satellite', 'speaker', 'tachometer', 'temperature',
-                   'dimming rearview', 'stow', 'bucket seat', '3rd row', 'split fold',
-                   'audio control', 'vanity', 'reading light', 'overhead', 'trip computer']
+    front_kw = ['headlight', 'head light', 'fog light', 'fog lamp', 'grille', 'hood', 'front bumper',
+                'daytime running', 'drl', 'high beam', 'low beam', 'led headlight', 'hid', 'front camera',
+                'approach light', 'perimeter', 'delay-off', 'automatic headlight', 'cornering']
+    rear_kw = ['rear camera', 'backup camera', 'back-up camera', 'parking camera rear', 'parkview',
+               'taillight', 'tail light', 'tail lamp', 'brake light', 'liftgate', 'tailgate', 'hatch',
+               'rear bumper', 'rear window wiper', 'rear wiper', 'spoiler', 'exhaust', 'trailer', 'tow hitch',
+               'rear park', 'license plate']
+    driver_kw = ['keyless entry', 'remote keyless', 'keyless', 'key fob', 'power sliding door', 'sliding door',
+                 'side mirror', 'door mirror', 'power mirror', 'heated mirror', 'running board', 'side step',
+                 'fuel door', 'puddle light', 'body side molding', 'belt molding']
+    side_kw = ['alloy', 'wheel', 'tire', 'rim', 'roof rack', 'rack', 'crossbar', 'molding', 'fender',
+               'rocker', 'touring suspension', 'chrome']
+    interior_kw = ['seat', 'leather', 'cloth', 'audio', 'screen', 'display', 'touchscreen', 'uconnect',
+                   'infotainment', 'navigation', 'climate', 'air conditioning', 'a/c', 'dual zone', 'dual-zone',
+                   'wireless', 'phone connectivity', 'bluetooth', 'carplay', 'android', 'usb', 'satellite',
+                   'speaker', 'steering wheel', 'cruise', 'push button start', 'push-button', 'keyless start',
+                   'tachometer', 'speedometer', 'gauge', 'trip computer', 'instrument', 'glove',
+                   'auto-dimming rearview', 'dimming rearview', 'rearview mirror', 'rear view mirror',
+                   'sun visor', 'vanity', 'overhead', 'reading light', 'sunroof', 'moonroof', 'armrest',
+                   'console', 'cup holder', 'cupholder', 'wireless charging', 'heated seat', 'power seat',
+                   'memory seat', 'lumbar', 'folding', 'fold', 'stow', '3rd row', 'third row', '2nd row',
+                   'second row', 'rear seat', 'rear air', 'rear climate', 'rear a/c', 'rear heat', 'dvd',
+                   'entertainment', 'cargo', 'trunk', 'captain']
 
     front_features, rear_features, driver_features = [], [], []
     side_features, interior_feat, unassigned = [], [], []
@@ -137,13 +157,15 @@ def generate_walkaround_script(vehicle, salesperson_name, dealer_name='Immaculat
     )
     result = json.loads(response.choices[0].message.content)
 
-    intro_s = result.get('intro', '')
+    _tr = (' ' + trim) if trim else ''
+    intro_s = ('Hey what is going on guys, ' + salesperson_name + ' here with ' + dealer_name + '. I am here today to walk you around this beautiful ' + str(year) + ' ' + str(make) + ' ' + str(model) + _tr + '. Let me show you what she has got.')
     front_s = result.get('front', '')
     driver_s = result.get('driver_side', '')
     rear_s = result.get('rear', '')
     pass_s = result.get('pass_side', '')
     interior_s = result.get('interior', '')
-    outro_s = result.get('outro', '')
+    _price = ('$' + str(price)) if price else 'a great price'
+    outro_s = ('Guys that is it for this ' + str(year) + ' ' + str(make) + ' ' + str(model) + _tr + '. It is priced at ' + _price + '. If you are interested give us a call or come on in and we will get you taken care of. I am ' + salesperson_name + ' with ' + dealer_name + ' - come see us!')
     full = result.get('full_script', '')
     if not full:
         full = ' '.join(filter(None, [intro_s, front_s, driver_s, rear_s, pass_s, interior_s, outro_s]))
