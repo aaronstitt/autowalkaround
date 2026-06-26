@@ -4,7 +4,7 @@ import json
 
 client = openai.OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 
-# ââââââââââââââââââââââââââââââââââââââââââââââ
+# Ã¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂ
 # SEGMENTED walkaround script - each segment maps to a camera position
 # Order mirrors walkaround v4.mov:
 # intro -> selfie face-cam: salesperson intro
@@ -14,7 +14,7 @@ client = openai.OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 # pass_side -> passenger side
 # interior -> inside vehicle
 # outro -> closing, price, CTA
-# ââââââââââââââââââââââââââââââââââââââââââââââ
+# Ã¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂ
 
 SYSTEM_PROMPT = """You are an expert automotive walkaround video scriptwriter.
 You write scripts for a salesperson physically walking a phone camera around a vehicle.
@@ -63,6 +63,9 @@ def generate_walkaround_script(vehicle, salesperson_name, dealer_name='Immaculat
     for part in [str(year), str(make), str(model)]:
         trim = trim.replace(part, '').strip()
     trim = trim.strip(' -\u2013')
+    for _junk in ['Certified Pre-Owned', 'Pre-Owned', 'Used', 'New', 'Certified']:
+        trim = trim.replace(_junk, '').replace(_junk.lower(), '')
+    trim = ' '.join(trim.split())
     price = vehicle.get('price', '')
     color = vehicle.get('color', '')
     highlighted = vehicle.get('highlighted_features', [])
