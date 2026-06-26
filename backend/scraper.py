@@ -52,7 +52,7 @@ def _fetch_with_retry(url: str, max_retries: int = 4, timeout: int = 20) -> requ
             if scraper_api_key:
                 # Use ScraperAPI proxy to bypass bot detection
                 proxy_url = f'https://api.scraperapi.com?api_key={scraper_api_key}&url={requests.utils.quote(url)}&render=false'
-                resp = session.get(proxy_url, timeout=max(timeout, 80), allow_redirects=True, headers={'x-sapi-instruction_set': json.dumps([{'type': 'loop', 'for': 3, 'instructions': [{'type': 'scroll', 'direction': 'y', 'value': 'bottom'}, {'type': 'wait', 'value': 3}]}])})
+                resp = session.get(proxy_url, timeout=max(timeout, 80), allow_redirects=True, headers={'x-sapi-instruction_set': json.dumps([{'type': 'loop', 'for': 15, 'instructions': [{'type': 'click', 'selector': {'type': 'css', 'value': '.btn-carousel'}}, {'type': 'wait', 'value': 1}]}])})
             else:
                 session.headers.update(HEADERS)
                 base_url = "/".join(url.split("/")[:3])
