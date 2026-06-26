@@ -52,7 +52,7 @@ def _fetch_with_retry(url: str, max_retries: int = 4, timeout: int = 20) -> requ
             if scraper_api_key:
                 # Use ScraperAPI proxy to bypass bot detection
                 proxy_url = f'https://api.scraperapi.com?api_key={scraper_api_key}&url={requests.utils.quote(url)}&render=false'
-                resp = session.get(proxy_url, timeout=max(timeout, 80), allow_redirects=True, headers={'x-sapi-instruction_set': json.dumps([{'type': 'loop', 'for': 15, 'instructions': [{'type': 'click', 'selector': {'type': 'css', 'value': '.btn-carousel'}}, {'type': 'wait', 'value': 1}]}])})
+                resp = session.get(proxy_url, timeout=max(timeout, 80), allow_redirects=True, headers={'x-sapi-instruction_set': json.dumps([{'type': 'wait_for_event', 'event': 'networkidle', 'timeout': 12}, {'type': 'click', 'selector': {'type': 'css', 'value': "[data-widget-name='ws-vehicle-media'] img"}}, {'type': 'wait', 'value': 5}])})
             else:
                 session.headers.update(HEADERS)
                 base_url = "/".join(url.split("/")[:3])
@@ -146,10 +146,16 @@ def parse_vehicle_html(html: str, url: str) -> dict:
     # Only grab JPG vehicle photos from dealer.com - filter out PNG files which are
     # 360-viewer UI elements (Carketa spinner graphics, not actual car photos)
     photo_pattern = re.compile(r'https://pictures\.dealer\.com/\S+?\.jpg', re.I)
+    _lb = soup.find(id='nuka-carousel') or soup.find(id='nuka-carousel-slider-frame')
     _media = soup.find(attrs={'data-widget-name': 'ws-vehicle-media'})
-    _scope_html = str(_media) if _media else html
+    if _lb:
+        _scope_html = str(_lb)
+    elif _media:
+        _scope_html = str(_media)
+    else:
+        _scope_html = html
     all_photos = list(dict.fromkeys(photo_pattern.findall(_scope_html)))
-    if len(all_photos) < 4:
+    if len(all_photos) < 5:
         all_photos = list(dict.fromkeys(photo_pattern.findall(html)))
     cleaned = []
     for p in all_photos:
