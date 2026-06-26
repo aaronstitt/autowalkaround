@@ -52,7 +52,7 @@ def _fetch_with_retry(url: str, max_retries: int = 4, timeout: int = 20) -> requ
             if scraper_api_key:
                 # Use ScraperAPI proxy to bypass bot detection
                 proxy_url = f'https://api.scraperapi.com?api_key={scraper_api_key}&url={requests.utils.quote(url)}&render=false'
-                resp = session.get(proxy_url, timeout=timeout, allow_redirects=True)
+                resp = session.get(proxy_url, timeout=max(timeout, 80), allow_redirects=True, headers={'x-sapi-instruction_set': json.dumps([{'type': 'loop', 'for': 3, 'instructions': [{'type': 'scroll', 'direction': 'y', 'value': 'bottom'}, {'type': 'wait', 'value': 3}]}])})
             else:
                 session.headers.update(HEADERS)
                 base_url = "/".join(url.split("/")[:3])
@@ -146,7 +146,11 @@ def parse_vehicle_html(html: str, url: str) -> dict:
     # Only grab JPG vehicle photos from dealer.com - filter out PNG files which are
     # 360-viewer UI elements (Carketa spinner graphics, not actual car photos)
     photo_pattern = re.compile(r'https://pictures\.dealer\.com/\S+?\.jpg', re.I)
-    all_photos = list(dict.fromkeys(photo_pattern.findall(html)))
+    _media = soup.find(attrs={'data-widget-name': 'ws-vehicle-media'})
+    _scope_html = str(_media) if _media else html
+    all_photos = list(dict.fromkeys(photo_pattern.findall(_scope_html)))
+    if len(all_photos) < 4:
+        all_photos = list(dict.fromkeys(photo_pattern.findall(html)))
     cleaned = []
     for p in all_photos:
         p = p.rstrip('"').rstrip("'").rstrip('>')
