@@ -138,7 +138,7 @@ async def _run_pipeline(job_id, vehicle_url, salesperson_id, dealership_id, page
         print('[Pipeline] Script:', len(full_script), 'chars, word_count:', script_data.get('word_count'))
         print('[Pipeline] Segment keys:', list(segments.keys()))
         try:
-            _dump = (full_script or '') + '\n\n--SEGMENTS--\n' + '\n'.join((str(k) + ': ' + str(v)) for k, v in (segments or {}).items())
+            _dump = (full_script or '') + '\n\n--PHOTOS--\n' + '\n'.join((vehicle.get('photos') or [])[:22]) + '\n\n--SEGMENTS--\n' + '\n'.join((str(k) + ': ' + str(v)) for k, v in (segments or {}).items())
             supabase.table('video_jobs').update({'script': _dump[:5000]}).eq('id', job_id).execute()
         except Exception:
             pass
