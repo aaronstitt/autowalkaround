@@ -692,6 +692,7 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
         ('front', _vp(0), 'Smooth cinematic slow orbit around the parked %s, the camera glides around revealing the front and side, the vehicle stays exactly the same shape color and details, photorealistic, natural daylight, no people, no text overlays' % vehicle_name),
         ('driver_side', _vp(2), 'Cinematic slow camera glide around the parked %s showing the side profile and the wheels, the vehicle stays exactly the same, photorealistic, no people, no text overlays' % vehicle_name),
         ('rear', _vp(4), 'Smooth cinematic orbit around the parked %s revealing more of the body and the rear, the vehicle stays exactly the same, photorealistic, no people, no text overlays' % vehicle_name),
+        ('interior', photos[min(int(_np * 0.55), _np - 1)] if _np else None, 'Slow cinematic camera glide through the interior of the %s showing the dashboard, infotainment screen, steering wheel, seats and controls, photorealistic, the interior stays exactly the same, no people, no text overlays' % vehicle_name),
     ]
     for seg_name, photo_url, fal_prompt in veh_segments:
         if not photo_url:
