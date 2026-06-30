@@ -237,25 +237,57 @@ async def fal_sample(req: FalSampleRequest, background_tasks: BackgroundTasks, c
 
 
 def _run_fal_interp(job_id, image_urls, prompt, duration):
-    import tempfile, os as _os
-    from video_assembler import fal_first_last_to_video, _upload_file_to_supabase
+    import tempfile, os as _os, time as _t, requests as _rq
+    from video_assembler import _upload_file_to_supabase, _download_file, FAL_KEY, FAL_FLF_MODEL
+    def fail(m):
+        supabase.table('video_jobs').update({'status': 'failed', 'status_message': str(m)[:250]}).eq('id', job_id).execute()
     try:
-        supabase.table('video_jobs').update({'status': 'assembling', 'status_message': 'fal interp generating (continuous walk test)'}).eq('id', job_id).execute()
-        tmp = tempfile.mkdtemp()
         urls = [u for u in (image_urls or []) if u]
-        pubs = []
+        if not FAL_KEY:
+            return fail('FAL_KEY empty on server')
+        if len(urls) < 2:
+            return fail('need >=2 image_urls')
+        hdr = {'Authorization': 'Key ' + FAL_KEY, 'Content-Type': 'application/json'}
+        tmp = tempfile.mkdtemp(); pubs = []; errs = []
+        supabase.table('video_jobs').update({'status': 'assembling', 'status_message': 'o1 interp generating'}).eq('id', job_id).execute()
         for i in range(len(urls) - 1):
-            clip = fal_first_last_to_video(urls[i], urls[i + 1], prompt, tmp, 'interp%d' % i, duration=duration)
-            if clip and _os.path.exists(clip):
-                pub = _upload_file_to_supabase(clip, 'fal_interp/' + job_id + '_%d.mp4' % i)
-                if pub:
-                    pubs.append(pub)
-        if not pubs:
-            supabase.table('video_jobs').update({'status': 'failed', 'status_message': 'fal interp returned nothing (FAL_KEY/credits?)'}).eq('id', job_id).execute()
-            return
-        supabase.table('video_jobs').update({'status': 'completed', 'status_message': 'Video ready!', 'output_url': pubs[0], 'script': '\n'.join(pubs)}).eq('id', job_id).execute()
+            body = {'prompt': prompt, 'start_image_url': urls[i], 'end_image_url': urls[i + 1], 'duration': str(duration)}
+            sub = _rq.post('https://queue.fal.run/' + FAL_FLF_MODEL, headers=hdr, json=body, timeout=60)
+            if sub.status_code not in (200, 201):
+                errs.append('submit%d=%s:%s' % (i, sub.status_code, sub.text[:140])); continue
+            sj = sub.json(); su = sj.get('status_url'); ru = sj.get('response_url')
+            done = False
+            for _ in range(72):
+                _t.sleep(10)
+                try:
+                    stt = _rq.get(su, headers=hdr, timeout=30).json().get('status')
+                except Exception:
+                    continue
+                if stt == 'COMPLETED':
+                    rj = _rq.get(ru, headers=hdr, timeout=60).json()
+                    vurl = (rj.get('video') or {}).get('url')
+                    if vurl:
+                        out = _os.path.join(tmp, 'ip%d.mp4' % i); _download_file(vurl, out)
+                        pub = _upload_file_to_supabase(out, 'fal_interp/' + job_id + '_%d.mp4' % i)
+                        if pub:
+                            pubs.append(pub)
+                    else:
+                        errs.append('clip%d=noURL:%s' % (i, str(rj)[:120]))
+                    done = True; break
+                if stt in ('FAILED', 'ERROR', 'CANCELLED'):
+                    try:
+                        rj = _rq.get(ru, headers=hdr, timeout=30).text[:140]
+                    except Exception:
+                        rj = ''
+                    errs.append('clip%d=%s:%s' % (i, stt, rj)); done = True; break
+            if not done:
+                errs.append('clip%d=timeout' % i)
+        if pubs:
+            supabase.table('video_jobs').update({'status': 'completed', 'status_message': ('ok ' + ';'.join(errs))[:160], 'output_url': pubs[0], 'script': '\n'.join(pubs)}).eq('id', job_id).execute()
+        else:
+            fail('no clips; ' + ';'.join(errs))
     except Exception as e:
-        supabase.table('video_jobs').update({'status': 'failed', 'status_message': str(e)[:200]}).eq('id', job_id).execute()
+        fail(e)
 
 
 @router.post('/fal-interp')
