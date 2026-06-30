@@ -307,3 +307,75 @@ async def fal_interp(req: FalInterpRequest, background_tasks: BackgroundTasks, c
     }).execute()
     background_tasks.add_task(_run_fal_interp, job_id, req.image_urls, prompt, req.duration or '5')
     return {'job_id': job_id, 'status': 'queued'}
+
+
+class ModelTestRequest(BaseModel):
+    model_id: str
+    image_url: str
+    end_image_url: Optional[str] = None
+    prompt: Optional[str] = None
+    duration: Optional[str] = '5'
+    extra: Optional[dict] = None
+
+
+def _run_model_test(job_id, model_id, image_url, end_image_url, prompt, duration, extra):
+    import tempfile, os as _os, time as _t, requests as _rq
+    from video_assembler import _upload_file_to_supabase, _download_file, FAL_KEY
+    def fail(m):
+        supabase.table('video_jobs').update({'status': 'failed', 'status_message': str(m)[:250]}).eq('id', job_id).execute()
+    try:
+        if not FAL_KEY:
+            return fail('FAL_KEY empty')
+        hdr = {'Authorization': 'Key ' + FAL_KEY, 'Content-Type': 'application/json'}
+        body = {'prompt': prompt or 'cinematic camera move', 'image_url': image_url}
+        if end_image_url:
+            body['end_image_url'] = end_image_url
+        if duration:
+            body['duration'] = str(duration)
+        if extra and isinstance(extra, dict):
+            body.update(extra)
+        supabase.table('video_jobs').update({'status': 'assembling', 'status_message': 'model-test ' + model_id}).eq('id', job_id).execute()
+        sub = _rq.post('https://queue.fal.run/' + model_id, headers=hdr, json=body, timeout=60)
+        if sub.status_code not in (200, 201):
+            return fail('submit %s: %s' % (sub.status_code, sub.text[:170]))
+        sj = sub.json(); su = sj.get('status_url'); ru = sj.get('response_url')
+        for _ in range(120):
+            _t.sleep(10)
+            try:
+                stt = _rq.get(su, headers=hdr, timeout=30).json().get('status')
+            except Exception:
+                continue
+            if stt == 'COMPLETED':
+                rj = _rq.get(ru, headers=hdr, timeout=60).json()
+                vurl = (rj.get('video') or {}).get('url')
+                if not vurl:
+                    return fail('noURL ' + str(rj)[:140])
+                out = _os.path.join(tempfile.mkdtemp(), 'm.mp4'); _download_file(vurl, out)
+                pub = _upload_file_to_supabase(out, 'model_test/' + job_id + '.mp4')
+                supabase.table('video_jobs').update({'status': 'completed', 'status_message': 'Video ready!', 'output_url': pub}).eq('id', job_id).execute()
+                return
+            if stt in ('FAILED', 'ERROR', 'CANCELLED'):
+                try:
+                    rj = _rq.get(ru, headers=hdr, timeout=30).text[:150]
+                except Exception:
+                    rj = ''
+                return fail('gen %s %s' % (stt, rj))
+        fail('timeout')
+    except Exception as e:
+        fail(e)
+
+
+@router.post('/model-test')
+async def model_test(req: ModelTestRequest, background_tasks: BackgroundTasks, current_user=Depends(get_current_user)):
+    user_id = current_user['sub']
+    resp = supabase.table('users').select('dealership_id').eq('id', user_id).single().execute()
+    dealership_id = resp.data.get('dealership_id')
+    job_id = str(uuid.uuid4())
+    supabase.table('video_jobs').insert({
+        'id': job_id, 'user_id': user_id, 'dealership_id': dealership_id,
+        'vehicle_url': req.image_url, 'vehicle_name': 'MODELTEST ' + req.model_id[:40],
+        'salesperson_id': 'fa5dc22a-03bc-4d21-b47b-09b460eec9fc',
+        'status': 'queued', 'status_message': 'model-test queued'
+    }).execute()
+    background_tasks.add_task(_run_model_test, job_id, req.model_id, req.image_url, req.end_image_url, req.prompt, req.duration, req.extra)
+    return {'job_id': job_id, 'status': 'queued'}
