@@ -50,12 +50,24 @@ def _fetch_with_retry(url: str, max_retries: int = 4, timeout: int = 20) -> requ
                 time.sleep(random.uniform(0.3, 1.0))
 
             if scraper_api_key:
-                # Use ScraperAPI proxy to bypass bot detection
-                proxy_url = f'https://api.scraperapi.com?api_key={scraper_api_key}&url={requests.utils.quote(url)}&render=false'
-                _hdrs = {'x-sapi-api_key': scraper_api_key, 'x-sapi-render': 'true'}
-                if attempt < 2:
-                    _hdrs['x-sapi-instruction_set'] = json.dumps([{'type': 'wait_for_event', 'event': 'networkidle', 'timeout': 10}, {'type': 'click', 'selector': {'type': 'css', 'value': "[data-widget-name='ws-vehicle-media'] img"}}, {'type': 'wait', 'value': 5}])
-                resp = session.get('https://api.scraperapi.com/', params={'url': url}, timeout=max(timeout, 110), allow_redirects=True, headers=_hdrs)
+                # ScraperAPI proxy. Rotate strategies so a render-budget 500 on this
+                # heavy dealer.com page does NOT fail the whole job:
+                #   attempt 0: render + click the gallery -> loads the full lazy lightbox
+                #   attempt 1: NO render (fast static HTML; dealer.com embeds every
+                #              pictures.dealer.com photo URL, incl. interiors, in its
+                #              page data layer, and render=false never 500s on budget)
+                #   attempt 2: render, no instruction (rendered DOM lazy images)
+                #   attempt 3: NO render (final safety net)
+                use_render = attempt in (0, 2)
+                _hdrs = {'x-sapi-api_key': scraper_api_key,
+                         'x-sapi-render': 'true' if use_render else 'false'}
+                if attempt == 0:
+                    _hdrs['x-sapi-instruction_set'] = json.dumps([
+                        {'type': 'wait_for_event', 'event': 'networkidle', 'timeout': 10},
+                        {'type': 'click', 'selector': {'type': 'css', 'value': "[data-widget-name='ws-vehicle-media'] img"}},
+                        {'type': 'wait', 'value': 5}])
+                _to = max(timeout, 110) if use_render else max(timeout, 60)
+                resp = session.get('https://api.scraperapi.com/', params={'url': url}, timeout=_to, allow_redirects=True, headers=_hdrs)
             else:
                 session.headers.update(HEADERS)
                 base_url = "/".join(url.split("/")[:3])
