@@ -4,7 +4,7 @@ import json
 
 client = openai.OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 
-# Ã¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂ
+# ÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂ
 # SEGMENTED walkaround script - each segment maps to a camera position
 # Order mirrors walkaround v4.mov:
 # intro -> selfie face-cam: salesperson intro
@@ -14,7 +14,7 @@ client = openai.OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 # pass_side -> passenger side
 # interior -> inside vehicle
 # outro -> closing, price, CTA
-# Ã¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂ
+# ÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂ
 
 SYSTEM_PROMPT = """You are an expert automotive walkaround video scriptwriter.
 You write scripts for a salesperson physically walking a phone camera around a vehicle.
@@ -52,7 +52,7 @@ WALKAROUND FLOW (most important rule):
 - Never claim a feature is somewhere it is not. Headlights and grille are up front; backup camera, wiper and liftgate are at the rear; seats, screen, climate and controls are inside.
 
 Return ONLY valid JSON with exactly these keys:
-intro, front, driver_side, rear, pass_side, interior, outro, full_script, word_count"""
+intro, front, driver_side, rear, pass_side, interior_front, interior_rear, outro, full_script, word_count"""
 
 def generate_walkaround_script(vehicle, salesperson_name, dealer_name='Immaculate Used Cars'):
     year = vehicle.get('year', '')
@@ -118,6 +118,9 @@ def generate_walkaround_script(vehicle, salesperson_name, dealer_name='Immaculat
     for i, f in enumerate(unassigned):
         buckets[i % 4].append(f)
 
+    interior_rear_kw = ['rear seat', '3rd row', 'third row', '2nd row', 'second row', 'split fold', 'folding', 'fold', 'stow', 'rear air', 'rear climate', 'rear a/c', 'rear heat', 'dvd', 'entertainment', 'cargo', 'trunk', 'captain', 'bench']
+    interior_front_feat = [f for f in interior_feat if not any(k in f.lower() for k in interior_rear_kw)]
+    interior_rear_feat = [f for f in interior_feat if any(k in f.lower() for k in interior_rear_kw)]
     color_str = (' in ' + color) if color else ''
 
     def feat_list(lst):
@@ -134,12 +137,13 @@ def generate_walkaround_script(vehicle, salesperson_name, dealer_name='Immaculat
         'DRIVER SIDE:\n' + feat_list(driver_features) + '\n\n'
         'REAR of vehicle:\n' + feat_list(rear_features) + '\n\n'
         'PASSENGER SIDE:\n' + feat_list(side_features) + '\n\n'
-        'INTERIOR:\n' + feat_list(interior_feat) + '\n\n'
+        'INTERIOR DASHBOARD and FRONT CONTROLS (talk about these while at the dashboard):\n' + feat_list(interior_front_feat) + '\n\n'
+        'INTERIOR REAR SEATS and CARGO (talk about these while at the back seats):\n' + feat_list(interior_rear_feat) + '\n\n'
         'INTRO (25-35 words MAX - selfie mode):\n'
         'Aaron faces camera, greets viewer warmly, introduces himself and the vehicle.\n'
         'Must include: his name Aaron, Immaculate Used Cars, year/make/model/trim.\n'
         'End with something like: Let me show you what she has got.\n\n'
-        'EACH MAIN SEGMENT (front, driver_side, rear, pass_side, interior):\n'
+        'EACH MAIN SEGMENT (front, driver_side, rear, pass_side, interior_front, interior_rear):\n'
         'STRICT MAXIMUM: 20-28 words per segment. No more. This is critical for lip sync.\n'
         'Pick 1-2 features max per segment. Be punchy and enthusiastic.\n\n'
         'OUTRO (20-28 words MAX):\n'
@@ -166,12 +170,13 @@ def generate_walkaround_script(vehicle, salesperson_name, dealer_name='Immaculat
     driver_s = result.get('driver_side', '')
     rear_s = result.get('rear', '')
     pass_s = result.get('pass_side', '')
-    interior_s = result.get('interior', '')
+    interior_front_s = result.get('interior_front', '')
+    interior_rear_s = result.get('interior_rear', '')
     _price = ('$' + str(price)) if price else 'a great price'
     outro_s = ('Guys that is it for this ' + str(year) + ' ' + str(make) + ' ' + str(model) + _tr + '. It is priced at ' + _price + '. If you are interested give us a call or come on in and we will get you taken care of. I am ' + salesperson_name + ' with ' + dealer_name + ' - come see us!')
     full = result.get('full_script', '')
     if not full:
-        full = ' '.join(filter(None, [intro_s, front_s, driver_s, rear_s, pass_s, interior_s, outro_s]))
+        full = ' '.join(filter(None, [intro_s, front_s, driver_s, rear_s, pass_s, interior_front_s, interior_rear_s, outro_s]))
 
     # Hard truncation safety net: if any segment exceeds ~130 words/min * 13s = ~28 words, trim it
     def _trim_to_words(text, max_words=28):
@@ -186,7 +191,8 @@ def generate_walkaround_script(vehicle, salesperson_name, dealer_name='Immaculat
     driver_s = _trim_to_words(driver_s)
     rear_s = _trim_to_words(rear_s)
     pass_s = _trim_to_words(pass_s)
-    interior_s = _trim_to_words(interior_s)
+    interior_front_s = _trim_to_words(interior_front_s)
+    interior_rear_s = _trim_to_words(interior_rear_s)
     outro_s = _trim_to_words(outro_s)
 
     vehicle['year_make_model'] = ' '.join(filter(None, [str(year), str(make), str(model), str(trim)]))
@@ -195,7 +201,7 @@ def generate_walkaround_script(vehicle, salesperson_name, dealer_name='Immaculat
         'full_script': full,
         'intro_script': intro_s,
         'exterior_script': ' '.join(filter(None, [front_s, driver_s, rear_s, pass_s])),
-        'interior_script': interior_s,
+        'interior_script': (interior_front_s + ' ' + interior_rear_s).strip(),
         'outro_script': outro_s,
         'segments': {
             'intro': intro_s,
@@ -203,7 +209,8 @@ def generate_walkaround_script(vehicle, salesperson_name, dealer_name='Immaculat
             'driver_side': driver_s,
             'rear': rear_s,
             'pass_side': pass_s,
-            'interior': interior_s,
+            'interior_front': interior_front_s,
+            'interior_rear': interior_rear_s,
             'outro': outro_s,
         },
         'feature_map': {
@@ -211,7 +218,8 @@ def generate_walkaround_script(vehicle, salesperson_name, dealer_name='Immaculat
             'driver_side': driver_features,
             'rear': rear_features,
             'pass_side': side_features,
-            'interior': interior_feat,
+            'interior_front': interior_front_feat,
+            'interior_rear': interior_rear_feat,
         },
         'word_count': len(full.split()),
     }
