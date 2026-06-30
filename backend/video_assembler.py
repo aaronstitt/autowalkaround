@@ -698,6 +698,32 @@ def _fal_vehicle_segment(photo_url, fal_prompt, narration_text, voice_id, tmpdir
     seg = _segment_with_voice(bf, audio_local, os.path.join(tmpdir, 'falseg_%s.mp4' % name), tmpdir, name)
     return seg or bf
 
+def _fal_interp_segment(start_photo, end_photo, fal_prompt, narration_text, voice_id, tmpdir, name):
+    """One leg of the continuous POV walk: the camera TRAVELS from start_photo to end_photo (Kling O1),
+    sized so the leg lasts about as long as its narration, with that narration laid over it."""
+    s_pub = _fal_prep_photo(start_photo, tmpdir, name + '_a')
+    e_pub = _fal_prep_photo(end_photo, tmpdir, name + '_b') if end_photo else None
+    if not s_pub:
+        print('[FAL-leg] %s: no start photo' % name)
+        return None
+    audio_local, _a = generate_tts_audio_url(narration_text, voice_id, tmpdir, 'leg_' + name)
+    secs = 5
+    if audio_local:
+        d = get_audio_duration(audio_local)
+        if d and d > 0:
+            secs = max(3, min(10, int(round(d))))
+    clip = fal_first_last_to_video(s_pub, e_pub, fal_prompt, tmpdir, name, duration=str(secs))
+    if not clip:
+        return None
+    bf = _blurfill_916(clip, os.path.join(tmpdir, 'bf_%s.mp4' % name))
+    if not bf:
+        return None
+    if not audio_local:
+        return bf
+    seg = _segment_with_voice(bf, audio_local, os.path.join(tmpdir, 'legseg_%s.mp4' % name), tmpdir, name)
+    return seg or bf
+
+
 def _classify_photos(photo_urls):
     """Tag each listing photo by camera view (vision) so every walkaround zone gets the RIGHT shot
     instead of guessing by gallery position (gallery length/order varies per vehicle, which was
@@ -796,35 +822,55 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
         return photos[min(i, _np - 1)] if _np else None
     _dash_fallback = photos[min(int(_np * 0.55), _np - 1)] if _np else None
     _rear_fallback = photos[min(int(_np * 0.85), _np - 1)] if _np else None
-    veh_segments = [
-        ('front', _zones.get('front') or _vp(0), 'Smooth cinematic slow orbit around the parked %s, the camera glides around revealing the front and side, the vehicle stays exactly the same shape color and details, photorealistic, natural daylight, no people, no text overlays' % vehicle_name),
-        ('driver_side', _zones.get('side') or _vp(2), 'Cinematic slow camera glide around the parked %s showing the side profile and the wheels, the vehicle stays exactly the same, photorealistic, no people, no text overlays' % vehicle_name),
-        ('rear', _zones.get('rear') or _vp(4), 'Smooth cinematic orbit around the parked %s revealing more of the body and the rear, the vehicle stays exactly the same, photorealistic, no people, no text overlays' % vehicle_name),
-        ('interior_front', _zones.get('dashboard') or _dash_fallback, 'Slow cinematic camera glide across the dashboard and front controls of the %s showing the steering wheel, the infotainment screen and the climate controls, photorealistic, the interior stays exactly the same, no people, no text overlays' % vehicle_name),
-        ('interior_rear', _zones.get('rear_seats') or _rear_fallback, 'Slow cinematic camera glide across the rear seats of the %s showing the second and third row passenger seating, photorealistic, the interior stays exactly the same, no people, no text overlays' % vehicle_name),
+    # CONTINUOUS POV WALK (matches the reference): front -> driver side -> open door/dashboard ->
+    # second row -> rear. Each leg is a Kling O1 transition that TRAVELS from one real listing photo
+    # to the next, narrated about the location it starts on, so it reads as one self-filmed walk.
+    walk = [
+        ('front', _zones.get('front') or _vp(0), 'front'),
+        ('driver_side', _zones.get('side') or _vp(2), 'driver_side'),
+        ('interior_front', _zones.get('dashboard') or _dash_fallback, 'interior_front'),
+        ('interior_rear', _zones.get('rear_seats') or _rear_fallback, 'interior_rear'),
+        ('rear', _zones.get('rear') or _vp(4), 'rear'),
     ]
-    for seg_name, photo_url, fal_prompt in veh_segments:
-        if not photo_url:
+    _clean = []
+    for _k, _p, _nk in walk:
+        if not _p:
             continue
-        seg_text = segments.get(seg_name, '')
+        if _clean and _clean[-1][1] == _p:
+            continue
+        _clean.append((_k, _p, _nk))
+    walk = _clean
+    for i in range(len(walk)):
+        seg_name, photo_url, narr_key = walk[i]
+        seg_text = segments.get(narr_key, '')
         if not seg_text or not seg_text.strip():
             seg_text = 'Check out the %s here at Immaculate Used Cars.' % vehicle_name
-        print('[Build] FAL segment: %s' % seg_name)
-        dur = '5' if seg_name == 'interior' else '10'
-        seg = _fal_vehicle_segment(photo_url, fal_prompt, seg_text, voice_id, tmpdir, seg_name, duration=dur)
+        if i < len(walk) - 1:
+            nxt_photo = walk[i + 1][1]
+            prompt = ('First-person POV walkaround of the %s at a used-car dealership. The camera is a salesperson '
+                      'filming on a phone, moving with smooth continuous handheld motion from the current viewpoint '
+                      'toward the next part of the vehicle; if moving inside, a door opens naturally and the camera '
+                      'steps in. Photorealistic, the exact same vehicle, colour and details unchanged, natural light, '
+                      'no people, no text overlays.') % vehicle_name
+            print('[Build] POV leg %d: %s -> next' % (i, seg_name))
+            seg = _fal_interp_segment(photo_url, nxt_photo, prompt, seg_text, voice_id, tmpdir, 'leg%d_%s' % (i, seg_name))
+        else:
+            prompt = ('Slow first-person POV of the %s, subtle handheld camera holding on this part of the vehicle, '
+                      'photorealistic, the exact same vehicle, no people, no text overlays.') % vehicle_name
+            print('[Build] POV final stop: %s' % seg_name)
+            seg = _fal_vehicle_segment(photo_url, prompt, seg_text, voice_id, tmpdir, 'leg%d_%s' % (i, seg_name), duration='5')
         if not seg:
-            print('[Build] FAL failed for %s, falling back to pan' % seg_name)
-            audio_local, _a = generate_tts_audio_url(seg_text, voice_id, tmpdir, 'fb_' + seg_name)
+            print('[Build] leg %s failed, pan fallback' % seg_name)
+            audio_local, _a = generate_tts_audio_url(seg_text, voice_id, tmpdir, 'fb_%d_%s' % (i, seg_name))
             if audio_local:
-                pl = os.path.join(tmpdir, 'fbphoto_%s.jpg' % seg_name)
+                pl = os.path.join(tmpdir, 'fbphoto_%d_%s.jpg' % (i, seg_name))
                 _download_file(photo_url, pl)
                 if os.path.exists(pl) and os.path.getsize(pl) > 1000:
-                    pan = _pov_pan_clip(pl, get_audio_duration(audio_local) + 0.4, os.path.join(tmpdir, 'fbpan_%s.mp4' % seg_name))
+                    pan = _pov_pan_clip(pl, get_audio_duration(audio_local) + 0.4, os.path.join(tmpdir, 'fbpan_%d_%s.mp4' % (i, seg_name)))
                     if pan:
-                        seg = _mux_av(pan, audio_local, os.path.join(tmpdir, 'fbseg_%s.mp4' % seg_name))
+                        seg = _mux_av(pan, audio_local, os.path.join(tmpdir, 'fbseg_%d_%s.mp4' % (i, seg_name)))
         if seg:
             all_clips.append(seg)
-
     if outro_text:
         print('[Build] == OUTRO (on-camera selfie, lot) ==')
         oc = generate_presenter_clip(outro_text, INTRO_LOOK, voice_id, tmpdir, 'outro')
@@ -863,5 +909,6 @@ def generate_heygen_audio(script_text, voice_id, tmpdir):
 
 def run_video_translation(video_url, audio_url, tmpdir):
     return None
+
 
 
