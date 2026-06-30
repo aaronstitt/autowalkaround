@@ -195,6 +195,12 @@ class FalSampleRequest(BaseModel):
     prompt: Optional[str] = None
 
 
+class FalInterpRequest(BaseModel):
+    image_urls: list[str]
+    prompt: Optional[str] = None
+    duration: Optional[str] = '5'
+
+
 def _run_fal_sample(job_id, image_url, prompt):
     import tempfile, os as _os
     from video_assembler import fal_image_to_video, _upload_file_to_supabase
@@ -227,4 +233,45 @@ async def fal_sample(req: FalSampleRequest, background_tasks: BackgroundTasks, c
         'status': 'queued', 'status_message': 'fal queued'
     }).execute()
     background_tasks.add_task(_run_fal_sample, job_id, req.image_url, prompt)
+    return {'job_id': job_id, 'status': 'queued'}
+
+
+def _run_fal_interp(job_id, image_urls, prompt, duration):
+    import tempfile, os as _os
+    from video_assembler import fal_first_last_to_video, _upload_file_to_supabase
+    try:
+        supabase.table('video_jobs').update({'status': 'assembling', 'status_message': 'fal interp generating (continuous walk test)'}).eq('id', job_id).execute()
+        tmp = tempfile.mkdtemp()
+        urls = [u for u in (image_urls or []) if u]
+        pubs = []
+        for i in range(len(urls) - 1):
+            clip = fal_first_last_to_video(urls[i], urls[i + 1], prompt, tmp, 'interp%d' % i, duration=duration)
+            if clip and _os.path.exists(clip):
+                pub = _upload_file_to_supabase(clip, 'fal_interp/' + job_id + '_%d.mp4' % i)
+                if pub:
+                    pubs.append(pub)
+        if not pubs:
+            supabase.table('video_jobs').update({'status': 'failed', 'status_message': 'fal interp returned nothing (FAL_KEY/credits?)'}).eq('id', job_id).execute()
+            return
+        supabase.table('video_jobs').update({'status': 'completed', 'status_message': 'Video ready!', 'output_url': pubs[0], 'script': '\n'.join(pubs)}).eq('id', job_id).execute()
+    except Exception as e:
+        supabase.table('video_jobs').update({'status': 'failed', 'status_message': str(e)[:200]}).eq('id', job_id).execute()
+
+
+@router.post('/fal-interp')
+async def fal_interp(req: FalInterpRequest, background_tasks: BackgroundTasks, current_user=Depends(get_current_user)):
+    user_id = current_user['sub']
+    resp = supabase.table('users').select('dealership_id').eq('id', user_id).single().execute()
+    dealership_id = resp.data.get('dealership_id')
+    job_id = str(uuid.uuid4())
+    prompt = req.prompt or ('First-person POV walkaround of a vehicle at a dealership lot. @Image1 is where the camera starts and @Image2 is where it ends. '
+                            'Smooth continuous handheld camera motion travelling from the first viewpoint to the second, photorealistic, '
+                            'the vehicle stays exactly the same shape colour and details, natural daylight, no people, no text overlays.')
+    supabase.table('video_jobs').insert({
+        'id': job_id, 'user_id': user_id, 'dealership_id': dealership_id,
+        'vehicle_url': (req.image_urls[0] if req.image_urls else ''), 'vehicle_name': 'FAL INTERP TEST',
+        'salesperson_id': 'fa5dc22a-03bc-4d21-b47b-09b460eec9fc',
+        'status': 'queued', 'status_message': 'fal interp queued'
+    }).execute()
+    background_tasks.add_task(_run_fal_interp, job_id, req.image_urls, prompt, req.duration or '5')
     return {'job_id': job_id, 'status': 'queued'}
