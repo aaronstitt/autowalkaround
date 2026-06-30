@@ -652,6 +652,65 @@ def _fal_vehicle_segment(photo_url, fal_prompt, narration_text, voice_id, tmpdir
     seg = _segment_with_voice(bf, audio_local, os.path.join(tmpdir, 'falseg_%s.mp4' % name), tmpdir, name)
     return seg or bf
 
+def _classify_photos(photo_urls):
+    """Tag each listing photo by camera view (vision) so every walkaround zone gets the RIGHT shot
+    instead of guessing by gallery position (gallery length/order varies per vehicle, which was
+    putting seats and a wheel into the interior segments). Returns {zone: url}; {} on any error,
+    in which case callers fall back to positional fractions."""
+    if not photo_urls:
+        return {}
+    try:
+        import openai, json as _json, re as _re
+        client = openai.OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+    except Exception as e:
+        print('[classify] openai unavailable:', e)
+        return {}
+    urls = list(photo_urls)[:26]
+    content = [{'type': 'text', 'text': (
+        'These are photos from ONE used-vehicle listing, given in order. For EACH image output its camera view. '
+        'Reply ONLY with a compact JSON array, one object per image IN ORDER: {"i":<0-based index>,"v":"<label>"}. '
+        'Allowed labels: front, front_quarter, side, rear_quarter, rear, wheel, dashboard, front_seats, '
+        'rear_seats, cargo, engine, badge, other. '
+        'dashboard = INTERIOR shot showing the steering wheel, gauge cluster, center console, or infotainment screen. '
+        'rear_seats = 2nd or 3rd row passenger seats. front_seats = first row seats only. '
+        'cargo = trunk / cargo area / folded seats. Be strict and precise.')}]
+    for u in urls:
+        content.append({'type': 'image_url', 'image_url': {'url': u, 'detail': 'low'}})
+    try:
+        resp = client.chat.completions.create(
+            model='gpt-4o-mini',
+            messages=[{'role': 'user', 'content': content}],
+            temperature=0, max_tokens=1200)
+        txt = resp.choices[0].message.content or ''
+        m = _re.search(r'\[.*\]', txt, _re.S)
+        tags = _json.loads(m.group(0)) if m else []
+    except Exception as e:
+        print('[classify] request failed:', e)
+        return {}
+    by = {}
+    for t in tags:
+        try:
+            i = int(t.get('i')); v = str(t.get('v') or '').lower().strip()
+        except Exception:
+            continue
+        if 0 <= i < len(urls):
+            by.setdefault(v, []).append(urls[i])
+    def first(*keys):
+        for k in keys:
+            if by.get(k):
+                return by[k][0]
+        return None
+    zones = {
+        'front': first('front', 'front_quarter'),
+        'side': first('side', 'front_quarter'),
+        'rear': first('rear', 'rear_quarter'),
+        'dashboard': first('dashboard'),
+        'rear_seats': first('rear_seats', 'front_seats', 'cargo'),
+    }
+    print('[classify] %d tags -> ' % len(tags) + ', '.join('%s:%s' % (k, 'Y' if v else '-') for k, v in zones.items()))
+    return zones
+
+
 def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
                            heygen_result, vehicle_photos, vehicle_video_url, tmpdir):
     segments = script_segments if isinstance(script_segments, dict) else {}
@@ -667,6 +726,7 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
     segment_order = ['front', 'driver_side', 'rear', 'pass_side', 'interior']
     raw_refs = [IMMACULATE_LOT_URL] + list(vehicle_photos or [])[:2]
     photos = [p for p in (vehicle_photos or []) if p]
+    _zones = _classify_photos(photos)
     def pick(frac):
         if not photos:
             return None
@@ -688,12 +748,14 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
     _np = len(photos)
     def _vp(i):
         return photos[min(i, _np - 1)] if _np else None
+    _dash_fallback = photos[min(int(_np * 0.55), _np - 1)] if _np else None
+    _rear_fallback = photos[min(int(_np * 0.85), _np - 1)] if _np else None
     veh_segments = [
-        ('front', _vp(0), 'Smooth cinematic slow orbit around the parked %s, the camera glides around revealing the front and side, the vehicle stays exactly the same shape color and details, photorealistic, natural daylight, no people, no text overlays' % vehicle_name),
-        ('driver_side', _vp(2), 'Cinematic slow camera glide around the parked %s showing the side profile and the wheels, the vehicle stays exactly the same, photorealistic, no people, no text overlays' % vehicle_name),
-        ('rear', _vp(4), 'Smooth cinematic orbit around the parked %s revealing more of the body and the rear, the vehicle stays exactly the same, photorealistic, no people, no text overlays' % vehicle_name),
-        ('interior_front', photos[min(int(_np * 0.55), _np - 1)] if _np else None, 'Slow cinematic camera glide across the dashboard and front controls of the %s showing the steering wheel, the infotainment screen and the climate controls, photorealistic, the interior stays exactly the same, no people, no text overlays' % vehicle_name),
-        ('interior_rear', photos[min(int(_np * 0.85), _np - 1)] if _np else None, 'Slow cinematic camera glide across the rear seats and cargo area of the %s showing the second and third row seating, photorealistic, the interior stays exactly the same, no people, no text overlays' % vehicle_name),
+        ('front', _zones.get('front') or _vp(0), 'Smooth cinematic slow orbit around the parked %s, the camera glides around revealing the front and side, the vehicle stays exactly the same shape color and details, photorealistic, natural daylight, no people, no text overlays' % vehicle_name),
+        ('driver_side', _zones.get('side') or _vp(2), 'Cinematic slow camera glide around the parked %s showing the side profile and the wheels, the vehicle stays exactly the same, photorealistic, no people, no text overlays' % vehicle_name),
+        ('rear', _zones.get('rear') or _vp(4), 'Smooth cinematic orbit around the parked %s revealing more of the body and the rear, the vehicle stays exactly the same, photorealistic, no people, no text overlays' % vehicle_name),
+        ('interior_front', _zones.get('dashboard') or _dash_fallback, 'Slow cinematic camera glide across the dashboard and front controls of the %s showing the steering wheel, the infotainment screen and the climate controls, photorealistic, the interior stays exactly the same, no people, no text overlays' % vehicle_name),
+        ('interior_rear', _zones.get('rear_seats') or _rear_fallback, 'Slow cinematic camera glide across the rear seats of the %s showing the second and third row passenger seating, photorealistic, the interior stays exactly the same, no people, no text overlays' % vehicle_name),
     ]
     for seg_name, photo_url, fal_prompt in veh_segments:
         if not photo_url:
@@ -755,3 +817,4 @@ def generate_heygen_audio(script_text, voice_id, tmpdir):
 
 def run_video_translation(video_url, audio_url, tmpdir):
     return None
+
