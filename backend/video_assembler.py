@@ -527,8 +527,14 @@ def _build_pov_insert(vehicle_photos, voice_id, tmpdir):
 FAL_KEY = os.getenv('FAL_KEY', '')
 FAL_I2V_MODEL = 'fal-ai/kling-video/v2.1/standard/image-to-video'
 FAL_FLF_MODEL = 'fal-ai/kling-video/o1/image-to-video'  # first->last frame interpolation (continuous camera travel)
+# Engine used for the continuous POV walk legs. Swappable via env in one line:
+#   bytedance/seedance-2.0/image-to-video (most realistic, slow/$$),
+#   fal-ai/veo3.1/image-to-video (fast, cheaper, single-frame),
+#   fal-ai/kling-video/o3/standard/image-to-video (cheapest, start+end),
+#   fal-ai/kling-video/o1/image-to-video (original).
+FAL_WALK_MODEL = os.getenv('FAL_WALK_MODEL', 'bytedance/seedance-2.0/image-to-video')
 FAL_POLL_INTERVAL = 10
-FAL_POLL_MAX = 72
+FAL_POLL_MAX = 180  # up to 30 min/clip (Seedance is slow)
 
 def fal_image_to_video(image_url, prompt, tmpdir, name, duration='5'):
     if not FAL_KEY:
@@ -584,7 +590,7 @@ def fal_image_to_video(image_url, prompt, tmpdir, name, duration='5'):
         print('[FAL] exc: %s' % e)
         return None
 
-def fal_first_last_to_video(start_url, end_url, prompt, tmpdir, name, duration='5'):
+def fal_first_last_to_video(start_url, end_url, prompt, tmpdir, name, duration='5', model=None):
     """Kling O1: synthesize the camera motion that TRAVELS from start_url to end_url.
     Chaining consecutive walkaround photos this way makes the result feel like ONE
     continuous handheld walk instead of a crossfaded slideshow."""
@@ -593,10 +599,29 @@ def fal_first_last_to_video(start_url, end_url, prompt, tmpdir, name, duration='
         return None
     try:
         hdr = {'Authorization': 'Key ' + FAL_KEY, 'Content-Type': 'application/json'}
-        body = {'prompt': prompt, 'start_image_url': start_url, 'duration': str(duration)}
-        if end_url:
-            body['end_image_url'] = end_url
-        sub = requests.post('https://queue.fal.run/' + FAL_FLF_MODEL, headers=hdr, json=body, timeout=60)
+        mdl = model or FAL_WALK_MODEL
+        ml = mdl.lower()
+        try:
+            _n = int(round(float(duration)))
+        except Exception:
+            _n = 5
+        body = {'prompt': prompt}
+        if 'seedance' in ml:
+            body.update({'image_url': start_url, 'duration': str(max(4, min(15, _n))), 'aspect_ratio': 'auto', 'resolution': '720p', 'generate_audio': False})
+            if end_url:
+                body['end_image_url'] = end_url
+        elif 'veo' in ml:
+            _vn = 8 if _n >= 7 else (6 if _n >= 5 else 4)
+            body.update({'image_url': start_url, 'duration': '%ds' % _vn, 'aspect_ratio': 'auto', 'resolution': '720p', 'generate_audio': False})
+        elif '/o1/' in ml:
+            body.update({'start_image_url': start_url, 'duration': str(max(3, min(10, _n)))})
+            if end_url:
+                body['end_image_url'] = end_url
+        else:  # kling o3 / generic
+            body.update({'image_url': start_url, 'duration': str(max(3, min(15, _n))), 'generate_audio': False})
+            if end_url:
+                body['end_image_url'] = end_url
+        sub = requests.post('https://queue.fal.run/' + mdl, headers=hdr, json=body, timeout=60)
         print('[FAL-FLF] submit %s: %s %s' % (name, sub.status_code, sub.text[:200]))
         if sub.status_code not in (200, 201):
             return None
@@ -858,7 +883,7 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
             prompt = ('Slow first-person POV of the %s, subtle handheld camera holding on this part of the vehicle, '
                       'photorealistic, the exact same vehicle, no people, no text overlays.') % vehicle_name
             print('[Build] POV final stop: %s' % seg_name)
-            seg = _fal_vehicle_segment(photo_url, prompt, seg_text, voice_id, tmpdir, 'leg%d_%s' % (i, seg_name), duration='5')
+            seg = _fal_interp_segment(photo_url, None, prompt, seg_text, voice_id, tmpdir, 'leg%d_%s' % (i, seg_name))
         if not seg:
             print('[Build] leg %s failed, pan fallback' % seg_name)
             audio_local, _a = generate_tts_audio_url(seg_text, voice_id, tmpdir, 'fb_%d_%s' % (i, seg_name))
@@ -909,6 +934,7 @@ def generate_heygen_audio(script_text, voice_id, tmpdir):
 
 def run_video_translation(video_url, audio_url, tmpdir):
     return None
+
 
 
 
