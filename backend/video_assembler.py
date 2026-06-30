@@ -526,6 +526,7 @@ def _build_pov_insert(vehicle_photos, voice_id, tmpdir):
 
 FAL_KEY = os.getenv('FAL_KEY', '')
 FAL_I2V_MODEL = 'fal-ai/kling-video/v2.1/standard/image-to-video'
+FAL_FLF_MODEL = 'fal-ai/kling-video/o1/image-to-video'  # first->last frame interpolation (continuous camera travel)
 FAL_POLL_INTERVAL = 10
 FAL_POLL_MAX = 72
 
@@ -582,6 +583,51 @@ def fal_image_to_video(image_url, prompt, tmpdir, name, duration='5'):
     except Exception as e:
         print('[FAL] exc: %s' % e)
         return None
+
+def fal_first_last_to_video(start_url, end_url, prompt, tmpdir, name, duration='5'):
+    """Kling O1: synthesize the camera motion that TRAVELS from start_url to end_url.
+    Chaining consecutive walkaround photos this way makes the result feel like ONE
+    continuous handheld walk instead of a crossfaded slideshow."""
+    if not FAL_KEY:
+        print('[FAL-FLF] FAL_KEY not set; skipping')
+        return None
+    try:
+        hdr = {'Authorization': 'Key ' + FAL_KEY, 'Content-Type': 'application/json'}
+        body = {'prompt': prompt, 'start_image_url': start_url, 'duration': str(duration)}
+        if end_url:
+            body['end_image_url'] = end_url
+        sub = requests.post('https://queue.fal.run/' + FAL_FLF_MODEL, headers=hdr, json=body, timeout=60)
+        print('[FAL-FLF] submit %s: %s %s' % (name, sub.status_code, sub.text[:200]))
+        if sub.status_code not in (200, 201):
+            return None
+        sj = sub.json()
+        status_url = sj.get('status_url'); response_url = sj.get('response_url')
+        if not status_url or not response_url:
+            print('[FAL-FLF] missing urls: %s' % str(sj)[:200]); return None
+        for i in range(FAL_POLL_MAX):
+            time.sleep(FAL_POLL_INTERVAL)
+            try:
+                st = requests.get(status_url, headers=hdr, timeout=30)
+                status = st.json().get('status')
+            except Exception as pe:
+                print('[FAL-FLF] poll err: %s' % pe); continue
+            print('[FAL-FLF] %s poll %d: %s' % (name, i + 1, status))
+            if status == 'COMPLETED':
+                res = requests.get(response_url, headers=hdr, timeout=60)
+                vurl = (res.json().get('video') or {}).get('url')
+                if not vurl:
+                    print('[FAL-FLF] no video url'); return None
+                out = os.path.join(tmpdir, name + '_flf.mp4')
+                _download_file(vurl, out)
+                if os.path.exists(out) and os.path.getsize(out) > 1000:
+                    print('[FAL-FLF] %s done: %s' % (name, vurl)); return out
+                return None
+            if status in ('FAILED', 'ERROR', 'CANCELLED'):
+                print('[FAL-FLF] %s failed: %s' % (name, st.text[:200])); return None
+        print('[FAL-FLF] %s timed out' % name); return None
+    except Exception as e:
+        print('[FAL-FLF] exc: %s' % e); return None
+
 
 def _ffrun(cmd, timeout=600):
     try:
@@ -817,4 +863,5 @@ def generate_heygen_audio(script_text, voice_id, tmpdir):
 
 def run_video_translation(video_url, audio_url, tmpdir):
     return None
+
 
