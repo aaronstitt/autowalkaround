@@ -101,6 +101,44 @@ def _fetch_with_retry(url: str, max_retries: int = 4, timeout: int = 20) -> requ
 
     raise requests.exceptions.RetryError(f"Failed to fetch {url} after {max_retries} attempts")
 
+def _plausible_price(jsonld_price: str, html: str) -> str:
+    """Return a believable vehicle sale price. Doc fees / add-ons (< $2,500) are rejected.
+    Fallback: scan the page for dealer.com price fields, then visible $X,XXX amounts."""
+    def _num(v):
+        try:
+            return int(float(str(v).replace(',', '').replace('$', '').strip()))
+        except Exception:
+            return 0
+    LO, HI = 2500, 250000
+    n = _num(jsonld_price)
+    if LO <= n <= HI:
+        return str(n)
+    candidates = []
+    # dealer.com structured fields, most authoritative first
+    for pat in (r'"internetPrice"\s*:\s*"?([\d,\.]+)',
+                r'"salePrice"\s*:\s*"?([\d,\.]+)',
+                r'"askingPrice"\s*:\s*"?([\d,\.]+)',
+                r'itemprop="price"[^>]*content="([\d,\.]+)"',
+                r'"price"\s*:\s*"?([\d,\.]+)'):
+        for m in re.findall(pat, html):
+            v = _num(m)
+            if LO <= v <= HI:
+                candidates.append(v)
+        if candidates:
+            break
+    if not candidates:
+        for m in re.findall(r'\$\s?(\d{1,3}(?:,\d{3})+)', html):
+            v = _num(m)
+            if LO <= v <= HI:
+                candidates.append(v)
+    if candidates:
+        # most repeated on-page amount is almost always the advertised price
+        best = max(set(candidates), key=candidates.count)
+        print(f'[Scraper] JSON-LD price {jsonld_price!r} implausible; using on-page price {best}')
+        return str(best)
+    print(f'[Scraper] JSON-LD price {jsonld_price!r} implausible and no fallback found; leaving empty')
+    return ''
+
 def parse_vehicle_html(html: str, url: str) -> dict:
     """Parse vehicle listing HTML into structured data."""
     soup = BeautifulSoup(html, "html.parser")
@@ -130,6 +168,10 @@ def parse_vehicle_html(html: str, url: str) -> dict:
                 break
         except Exception:
             continue
+
+    # v2: JSON-LD offers.price on this dealer.com template can surface the DOC FEE
+    # (e.g. $599) instead of the sale price. Sanity-check and fall back to on-page prices.
+    vehicle["price"] = _plausible_price(vehicle.get("price", ""), html)
 
     mileage_match = re.search(r'([\d,]+)\s*miles', html, re.I)
     if mileage_match:

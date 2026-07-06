@@ -20,10 +20,20 @@ IMMACULATE_LOGO_URL = 'https://pictures.dealer.com/i/immaculateusedcarsut/1234/7
 CINEMATIC_MIN_DURATION = 5
 CINEMATIC_MAX_DURATION = 15
 
+# v2 iteration tunables (feedback on Caravan_Continuous_POV_v1)
+TTS_SPEED = float(os.getenv('TTS_SPEED', '1.0'))            # was 0.92 - talking read too slow
+PRESENTER_PACE = float(os.getenv('PRESENTER_PACE', '1.08')) # speed up intro/outro delivery, keeps lipsync
+AUDIO_CLEAN_FILTER = os.getenv('AUDIO_CLEAN_FILTER', 'highpass=f=80,lowpass=f=12000,afftdn=nf=-28')
+
 def heygen_headers():
     return {'x-api-key': os.getenv('HEYGEN_API_KEY'), 'Content-Type': 'application/json'}
 
 def get_starfish_voice_id(preferred_voice_id):
+    # v2: the cloned voice is pinned. Discovery previously could swap in a different
+    # private voice or a PUBLIC male voice - that mismatch is what made the v1 outro
+    # voice incoherent with the avatar reference. Only discover if no pin exists.
+    if preferred_voice_id:
+        return preferred_voice_id
     try:
         r = requests.get(HEYGEN_BASE + '/v3/voices?type=private&engine=starfish&limit=20',
                          headers=heygen_headers(), timeout=30)
@@ -187,7 +197,7 @@ def _poll_lipsync(lipsync_id, clip_name, tmpdir):
 def generate_tts_audio_url(text, voice_id, tmpdir, clip_name):
     try:
         sid = get_starfish_voice_id(voice_id)
-        payload = {'text': text, 'voice_id': sid, 'speed': 0.92, 'input_type': 'text', 'language': 'en'}
+        payload = {'text': text, 'voice_id': sid, 'speed': TTS_SPEED, 'input_type': 'text', 'language': 'en'}
         r = requests.post(HEYGEN_BASE + '/v3/voices/speech', headers=heygen_headers(),
                           json=payload, timeout=180)
         if r.status_code != 200:
@@ -304,10 +314,24 @@ def generate_presenter_clip(text, look_id, voice_id, tmpdir, clip_name, backgrou
         print(f'[Presenter] Error: {e}')
         return None
 
+def _pace_clip(clip_in, tmpdir, name, factor=None):
+    """Uniformly speed up a presenter clip (video+audio together so lipsync holds).
+    v2 fix: intro delivery read too slow at natural HeyGen pace."""
+    f = factor or PRESENTER_PACE
+    if not clip_in or abs(f - 1.0) < 0.01:
+        return clip_in
+    out = os.path.join(tmpdir, 'paced_%s.mp4' % name)
+    if _ffrun(['ffmpeg', '-y', '-i', clip_in,
+               '-filter_complex', '[0:v]setpts=PTS/%.3f[v];[0:a]atempo=%.3f[a]' % (f, f),
+               '-map', '[v]', '-map', '[a]', '-c:v', 'libx264', '-preset', 'fast', '-crf', '22',
+               '-c:a', 'aac', '-b:a', '128k', out]):
+        return out
+    return clip_in
+
 def _tts_fallback_clip(text, voice_id, tmpdir, clip_name):
     try:
         sid = get_starfish_voice_id(voice_id)
-        payload = {'text': text, 'voice_id': sid, 'speed': 0.92, 'input_type': 'text', 'language': 'en'}
+        payload = {'text': text, 'voice_id': sid, 'speed': TTS_SPEED, 'input_type': 'text', 'language': 'en'}
         r = requests.post(HEYGEN_BASE + '/v3/voices/speech', headers=heygen_headers(),
                           json=payload, timeout=180)
         if r.status_code != 200:
@@ -484,6 +508,7 @@ def _normalize_clip(src, out):
               'pad=720:1280:(ow-iw)/2:(oh-ih)/2,fps=25,format=yuv420p,setsar=1')
         cmd = ['ffmpeg', '-y', '-i', src, '-vf', vf,
                '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+               '-af', AUDIO_CLEAN_FILTER,
                '-c:a', 'aac', '-b:a', '128k', '-ar', '44100',
                '-movflags', '+faststart', out]
         r = subprocess.run(cmd, capture_output=True, timeout=300)
@@ -736,7 +761,8 @@ def _fal_interp_segment(start_photo, end_photo, fal_prompt, narration_text, voic
     if audio_local:
         d = get_audio_duration(audio_local)
         if d and d > 0:
-            secs = max(3, min(10, int(round(d))))
+            # v2: +1s headroom and a 5s floor so the camera move is slower / more human
+            secs = max(5, min(12, int(round(d + 1.0))))
     clip = fal_first_last_to_video(s_pub, e_pub, fal_prompt, tmpdir, name, duration=str(secs))
     if not clip:
         return None
@@ -839,7 +865,7 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
         if not ic:
             ic = _tts_fallback_clip(intro_text, voice_id, tmpdir, 'intro')
         if ic:
-            all_clips.append(ic)
+            all_clips.append(_pace_clip(ic, tmpdir, 'intro'))
 
     print('[Build] == FAL VEHICLE SHOWCASE (photoreal image-to-video) ==')
     _np = len(photos)
@@ -865,6 +891,26 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
             continue
         _clean.append((_k, _p, _nk))
     walk = _clean
+    # v2: each leg gets an explicit from->to camera move. The generic "moves toward the
+    # next part" prompt let the model invent an avatar exiting the car next to a duplicate
+    # of itself at the interior->exterior handoff (v1 @0:44). Interior exits must be
+    # described as the VIEWER stepping out of the same, single vehicle.
+    _leg_moves = {
+        ('front', 'driver_side'): 'walking slowly from the front of the vehicle around to the driver side',
+        ('driver_side', 'interior_front'): 'the driver door opens naturally and the camera slowly steps '
+            'inside, settling on the dashboard and steering wheel',
+        ('interior_front', 'interior_rear'): 'the camera turns slowly from the dashboard toward the '
+            'second-row seats inside the same vehicle',
+        ('interior_rear', 'rear'): 'the camera turns and steps out through the open door of the very same '
+            'vehicle it has been inside, then walks slowly around to the rear of that same single vehicle',
+    }
+    _pace_txt = ('The pace is slow and deliberate like a real person walking while filming: natural handheld '
+                 'sway, slight footstep bob, brief pauses, imperfect framing - never gliding, never '
+                 'drone-smooth, never fast. ')
+    _one_vehicle_txt = ('Exactly ONE vehicle exists in the scene: the same %s throughout, colour and details '
+                        'unchanged. No people, no hands, no reflection of a person, no second vehicle, no '
+                        'duplicate vehicle, no text overlays. Photorealistic, natural light, used-car '
+                        'dealership lot.')
     for i in range(len(walk)):
         seg_name, photo_url, narr_key = walk[i]
         seg_text = segments.get(narr_key, '')
@@ -872,16 +918,15 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
             seg_text = 'Check out the %s here at Immaculate Used Cars.' % vehicle_name
         if i < len(walk) - 1:
             nxt_photo = walk[i + 1][1]
-            prompt = ('First-person POV walkaround of the %s at a used-car dealership. The camera is a salesperson '
-                      'filming on a phone, moving with smooth continuous handheld motion from the current viewpoint '
-                      'toward the next part of the vehicle; if moving inside, a door opens naturally and the camera '
-                      'steps in. Photorealistic, the exact same vehicle, colour and details unchanged, natural light, '
-                      'no people, no text overlays.') % vehicle_name
+            _move = _leg_moves.get((seg_name, walk[i + 1][0]),
+                                   'moving from the current viewpoint toward the next part of the same vehicle')
+            prompt = ('First-person POV shot from a salesperson filming a used vehicle on a phone: %s. '
+                      % _move) + _pace_txt + (_one_vehicle_txt % vehicle_name)
             print('[Build] POV leg %d: %s -> next' % (i, seg_name))
             seg = _fal_interp_segment(photo_url, nxt_photo, prompt, seg_text, voice_id, tmpdir, 'leg%d_%s' % (i, seg_name))
         else:
-            prompt = ('Slow first-person POV of the %s, subtle handheld camera holding on this part of the vehicle, '
-                      'photorealistic, the exact same vehicle, no people, no text overlays.') % vehicle_name
+            prompt = ('Slow first-person POV holding on this part of the vehicle, subtle natural handheld '
+                      'movement as if standing still while filming on a phone. ') + (_one_vehicle_txt % vehicle_name)
             print('[Build] POV final stop: %s' % seg_name)
             seg = _fal_interp_segment(photo_url, None, prompt, seg_text, voice_id, tmpdir, 'leg%d_%s' % (i, seg_name))
         if not seg:
@@ -902,7 +947,7 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
         if not oc:
             oc = _tts_fallback_clip(outro_text, voice_id, tmpdir, 'outro')
         if oc:
-            all_clips.append(oc)
+            all_clips.append(_pace_clip(oc, tmpdir, 'outro'))
     if not all_clips:
         raise RuntimeError('No clips built')
     norm_clips = []
@@ -924,7 +969,7 @@ def upload_audio_to_heygen(audio_path):
 
 def generate_heygen_audio(script_text, voice_id, tmpdir):
     sid = get_starfish_voice_id(voice_id)
-    payload = {'text': script_text, 'voice_id': sid, 'speed': 0.92, 'input_type': 'text', 'language': 'en'}
+    payload = {'text': script_text, 'voice_id': sid, 'speed': TTS_SPEED, 'input_type': 'text', 'language': 'en'}
     r = requests.post(HEYGEN_BASE + '/v3/voices/speech', headers=heygen_headers(),
                       json=payload, timeout=180)
     audio_url = r.json().get('data', {}).get('audio_url')
