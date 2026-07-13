@@ -29,6 +29,11 @@ REQUIRE_FAL = os.getenv('REQUIRE_FAL', '1').lower() not in ('0', 'false', 'no')
 # pan-only video (which is what the v3 render turned out to be).
 _FAL_LOCK = {'locked': False, 'detail': ''}
 AUDIO_CLEAN_FILTER = os.getenv('AUDIO_CLEAN_FILTER', 'highpass=f=80,lowpass=f=12000,afftdn=nf=-28')
+# v4.1: minimum fraction of voiced (pitch-periodic) frames for a presenter clip's audio
+# to count as SPEECH. Measured on real renders: genuine speech 0.47-0.77; the v3 popped
+# outro (lip-moving avatar over mouth-pop noise) 0.12. Volume checks cannot make this
+# distinction (speech ~-34 dB vs the pop clip's -32.6 dB).
+VOICED_MIN = float(os.getenv('VOICED_MIN', '0.30'))
 
 def heygen_headers():
     return {'x-api-key': os.getenv('HEYGEN_API_KEY'), 'Content-Type': 'application/json'}
@@ -551,6 +556,55 @@ def _audio_mean_volume(src):
     except Exception:
         return None
 
+def _voiced_fraction(src, tmpdir):
+    """Fraction of active 40ms frames whose autocorrelation shows pitch periodicity
+    (70-300 Hz), i.e. an actual voice. Catches the HeyGen pop-clip failure that mean
+    volume provably cannot (v3 outro: mouth pops at -32.6 dB mean, voiced fraction 0.12
+    vs 0.47-0.77 for genuine speech). Pure stdlib; None = unmeasurable."""
+    wav = os.path.join(tmpdir, '_vf_%s.wav' % hashlib.md5(src.encode()).hexdigest()[:10])
+    try:
+        r = subprocess.run(['ffmpeg', '-y', '-v', 'error', '-i', src, '-map', '0:a:0',
+                            '-ac', '1', '-ar', '8000', wav], capture_output=True, timeout=180)
+        if r.returncode != 0 or not os.path.exists(wav):
+            return None
+        import wave as _wave, struct as _struct
+        w = _wave.open(wav)
+        n = w.getnframes()
+        d = _struct.unpack('<%dh' % n, w.readframes(n))
+        w.close()
+        sr = 8000
+        fl = int(0.04 * sr)
+        lo, hi = sr // 300, sr // 70
+        voiced = frames = 0
+        for i in range(0, n - fl, fl // 2):
+            f = d[i:i + fl]
+            mean = sum(f) / fl
+            f = [x - mean for x in f]
+            e0 = sum(x * x for x in f)
+            if (e0 / fl) ** 0.5 < 160:  # skip near-silent frames (~0.005 FS)
+                continue
+            frames += 1
+            best = 0.0
+            for lag in range(lo, hi):
+                s = 0.0
+                for j in range(fl - lag):
+                    s += f[j] * f[j + lag]
+                if s > best:
+                    best = s
+            if best / (e0 + 1e-9) > 0.5:
+                voiced += 1
+        if frames < 10:
+            return 0.0  # nothing audible at all -> definitely not speech
+        return voiced / frames
+    except Exception as e:
+        print('[voiced] %s' % e)
+        return None
+    finally:
+        try:
+            os.remove(wav)
+        except OSError:
+            pass
+
 def _normalize_clip(src, out):
     # v3 CRITICAL FIX: every clip leaves here with an audio stream EXACTLY as long as its
     # video (apad + -shortest; silent track injected if the clip has no audio at all).
@@ -945,6 +999,18 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
         if not ic:
             ic = _tts_fallback_clip(intro_text, voice_id, tmpdir, 'intro')
         if ic:
+            # v4.1: the v3 outro failure (HeyGen returns a lip-moving clip whose audio is
+            # unvoiced mouth-pops, loud enough to pass any volume check) can hit the intro
+            # too. Detect by VOICING, and only pay for the lipsync repair when needed.
+            _ivf = _voiced_fraction(ic, tmpdir)
+            print('[Build] intro voiced_fraction=%s' % str(_ivf))
+            if _ivf is not None and _ivf < VOICED_MIN:
+                print('[Build] intro audio is pops/mute, not speech - forcing pinned voice')
+                ic = _force_voice_on_clip(ic, intro_text, voice_id, tmpdir, 'intro')
+                _ivf = _voiced_fraction(ic, tmpdir)
+                if _ivf is not None and _ivf < VOICED_MIN:
+                    print('[Build] intro STILL unvoiced (%s) - TTS-over-card fallback' % str(_ivf))
+                    ic = _tts_fallback_clip(intro_text, voice_id, tmpdir, 'intro') or ic
             all_clips.append(_pace_clip(ic, tmpdir, 'intro'))
 
     print('[Build] == FAL VEHICLE SHOWCASE (photoreal image-to-video) ==')
@@ -1039,8 +1105,12 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
             # TTS is lipsynced onto the clip so the voice is guaranteed by construction.
             oc = _force_voice_on_clip(oc, outro_text, voice_id, tmpdir, 'outro')
             _mv = _audio_mean_volume(oc)
-            if _mv is None or _mv < -38.0:
-                print('[Build] outro still quiet (mean %s dB) - TTS-over-card fallback' % str(_mv))
+            # v4.1: volume alone provably cannot catch the pop-clip failure (speech is
+            # ~-34 dB, the popped v3 outro was -32.6 dB). Voicing can.
+            _ovf = _voiced_fraction(oc, tmpdir)
+            print('[Build] outro mean=%s dB voiced_fraction=%s' % (str(_mv), str(_ovf)))
+            if _mv is None or _mv < -38.0 or (_ovf is not None and _ovf < VOICED_MIN):
+                print('[Build] outro audio failed the voice check - TTS-over-card fallback')
                 oc = _tts_fallback_clip(outro_text, voice_id, tmpdir, 'outro') or oc
         if not oc:
             oc = _tts_fallback_clip(outro_text, voice_id, tmpdir, 'outro')
