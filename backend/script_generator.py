@@ -4,6 +4,34 @@ import json
 
 client = openai.OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 
+# v4: HeyGen's avatar+script TTS choked on the raw "$12829" outro (rendered a MUTE
+# clip in the v3 Caravan video), and digit strings read unnaturally anyway. Prices
+# are spoken as words.
+_W_ONES = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten',
+           'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen',
+           'eighteen', 'nineteen']
+_W_TENS = ['', '', 'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety']
+
+def _int_words(n):
+    if n < 20:
+        return _W_ONES[n]
+    if n < 100:
+        return _W_TENS[n // 10] + (('-' + _W_ONES[n % 10]) if n % 10 else '')
+    if n < 1000:
+        return _W_ONES[n // 100] + ' hundred' + ((' ' + _int_words(n % 100)) if n % 100 else '')
+    if n < 1000000:
+        return _int_words(n // 1000) + ' thousand' + ((' ' + _int_words(n % 1000)) if n % 1000 else '')
+    return str(n)
+
+def _price_words(price):
+    try:
+        n = int(float(str(price).replace(',', '').replace('$', '').strip()))
+    except Exception:
+        return None
+    if n <= 0:
+        return None
+    return _int_words(n) + ' dollars'
+
 # ÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂÃÂ¢ÃÂÃÂ
 # SEGMENTED walkaround script - each segment maps to a camera position
 # Order mirrors walkaround v4.mov:
@@ -56,7 +84,8 @@ WALKAROUND FLOW (most important rule):
 Return ONLY valid JSON with exactly these keys:
 intro, front, driver_side, interior_front, interior_rear, rear, outro, full_script, word_count"""
 
-def generate_walkaround_script(vehicle, salesperson_name, dealer_name='Immaculate Used Cars'):
+def generate_walkaround_script(vehicle, salesperson_name, dealer_name='Immaculate Used Cars',
+                               zone_photos=None):
     year = vehicle.get('year', '')
     make = vehicle.get('make', '')
     model = vehicle.get('model', '')
@@ -159,11 +188,31 @@ def generate_walkaround_script(vehicle, salesperson_name, dealer_name='Immaculat
         'COUNT YOUR WORDS. Each segment must be 20-28 words or less.'
     )
 
+    # v4: ground each segment's narration in the photo the camera ACTUALLY shows for
+    # that leg (v3 talked about the second row while the camera held the dashboard).
+    user_content = prompt
+    _seg_zone = [('front', 'front'), ('driver_side', 'side'), ('interior_front', 'dashboard'),
+                 ('interior_rear', 'rear_seats'), ('rear', 'rear')]
+    if zone_photos:
+        _imgs, _order = [], []
+        for _seg, _zone in _seg_zone:
+            _u = zone_photos.get(_zone)
+            if _u:
+                _order.append(_seg.upper())
+                _imgs.append({'type': 'image_url', 'image_url': {'url': _u, 'detail': 'low'}})
+        if _imgs:
+            _ground = ('\n\nGROUNDING PHOTOS (in order: ' + ', '.join(_order) + '): each photo is the '
+                       'EXACT view the camera shows while that segment\'s narration plays. HARD RULE: a '
+                       'segment may only point at ("check this out", "back here", "look at") things '
+                       'actually visible in ITS photo. If an assigned feature is not visible in the '
+                       'photo, skip it or mention it in passing without pointing the viewer at it. '
+                       'Describe what the photo shows, in the order the viewer sees it.')
+            user_content = [{'type': 'text', 'text': prompt + _ground}] + _imgs
     response = client.chat.completions.create(
         model='gpt-4o-mini',
         messages=[
             {'role': 'system', 'content': SYSTEM_PROMPT},
-            {'role': 'user', 'content': prompt}
+            {'role': 'user', 'content': user_content}
         ],
         response_format={'type': 'json_object'},
         temperature=0.85
@@ -177,7 +226,7 @@ def generate_walkaround_script(vehicle, salesperson_name, dealer_name='Immaculat
     rear_s = result.get('rear', '')
     interior_front_s = result.get('interior_front', '')
     interior_rear_s = result.get('interior_rear', '')
-    _price = ('$' + str(price)) if price else 'a great price'
+    _price = _price_words(price) or 'a great price'
     outro_s = ('Guys that is it for this ' + str(year) + ' ' + str(make) + ' ' + str(model) + _tr + '. It is priced at ' + _price + '. If you are interested give us a call or come on in and we will get you taken care of. I am ' + salesperson_name + ' with ' + dealer_name + ' - come see us!')
     full = result.get('full_script', '')
     if not full:
@@ -199,7 +248,8 @@ def generate_walkaround_script(vehicle, salesperson_name, dealer_name='Immaculat
     rear_s = _trim_to_words(rear_s)
     interior_front_s = _trim_to_words(interior_front_s)
     interior_rear_s = _trim_to_words(interior_rear_s)
-    outro_s = _trim_to_words(outro_s)
+    # v4: spoken-word prices are ~6 words longer than '$12829'; give the outro room
+    outro_s = _trim_to_words(outro_s, 36)
 
     vehicle['year_make_model'] = ' '.join(filter(None, [str(year), str(make), str(model), str(trim)]))
 

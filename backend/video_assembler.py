@@ -23,6 +23,11 @@ CINEMATIC_MAX_DURATION = 15
 # v2 iteration tunables (feedback on Caravan_Continuous_POV_v1)
 TTS_SPEED = float(os.getenv('TTS_SPEED', '1.0'))            # was 0.92 - talking read too slow
 PRESENTER_PACE = float(os.getenv('PRESENTER_PACE', '1.08')) # speed up intro/outro delivery, keeps lipsync
+REQUIRE_FAL = os.getenv('REQUIRE_FAL', '1').lower() not in ('0', 'false', 'no')
+# v4: set when fal rejects a submit because the account balance is exhausted, so the
+# build fails fast with an actionable message instead of silently shipping a degraded
+# pan-only video (which is what the v3 render turned out to be).
+_FAL_LOCK = {'locked': False, 'detail': ''}
 AUDIO_CLEAN_FILTER = os.getenv('AUDIO_CLEAN_FILTER', 'highpass=f=80,lowpass=f=12000,afftdn=nf=-28')
 
 def heygen_headers():
@@ -353,6 +358,27 @@ def _tts_fallback_clip(text, voice_id, tmpdir, clip_name):
     except Exception as e:
         print(f'[TTS-fallback] {clip_name}: {e}')
     return None
+
+def _force_voice_on_clip(clip, text, voice_id, tmpdir, name):
+    """v4: guarantee the pinned cloned voice is AUDIBLY present on a presenter clip.
+    The v3 outro proved HeyGen's avatar+script call can complete successfully yet
+    render a mute clip - and mean volume cannot catch it (a speaking HeyGen clip
+    averages ~-34 dB, the mute one averaged -32.6 dB). Instead of detecting the
+    failure, remove it structurally: our /v3/voices/speech TTS is the proven voice
+    path (every walk leg speaks), so its audio becomes the source of truth and is
+    precision-lipsynced onto the clip. If lipsync fails, the TTS audio is hard-muxed
+    over the clip (slightly off lips beat a silent avatar)."""
+    audio_local, audio_pub = generate_tts_audio_url(text, voice_id, tmpdir, 'force_' + name)
+    if not audio_local:
+        print('[ForceVoice] %s: TTS failed, keeping original clip' % name)
+        return clip
+    synced = None
+    if audio_pub:
+        synced = apply_lipsync(clip, audio_pub, 'force_' + name, tmpdir)
+    if not synced:
+        print('[ForceVoice] %s: lipsync unavailable, hard-muxing TTS audio' % name)
+        synced = _mux_av(clip, audio_local, os.path.join(tmpdir, 'forced_%s.mp4' % name))
+    return synced or clip
 
 def _download_file(url, dest_path):
     r = requests.get(url, headers=HEADERS, stream=True, timeout=300)
@@ -688,6 +714,11 @@ def fal_first_last_to_video(start_url, end_url, prompt, tmpdir, name, duration='
         sub = requests.post('https://queue.fal.run/' + mdl, headers=hdr, json=body, timeout=60)
         print('[FAL-FLF] submit %s: %s %s' % (name, sub.status_code, sub.text[:200]))
         if sub.status_code not in (200, 201):
+            # v4: an exhausted-balance 403 means EVERY leg will fail; flag it so the
+            # build can abort with an actionable error instead of degrading silently.
+            if sub.status_code == 403 and 'balance' in sub.text.lower():
+                _FAL_LOCK['locked'] = True
+                _FAL_LOCK['detail'] = sub.text[:160]
             return None
         sj = sub.json()
         status_url = sj.get('status_url'); response_url = sj.get('response_url')
@@ -881,7 +912,8 @@ def _classify_photos(photo_urls):
 
 
 def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
-                           heygen_result, vehicle_photos, vehicle_video_url, tmpdir):
+                           heygen_result, vehicle_photos, vehicle_video_url, tmpdir,
+                           photo_zones=None):
     segments = script_segments if isinstance(script_segments, dict) else {}
     voice_id = heygen_result.get('voice_id') if isinstance(heygen_result, dict) else None
     voice_id = voice_id or os.getenv('HEYGEN_VOICE_ID', '6ee20575cb9f4a7e9dc19096a958eab1')
@@ -895,7 +927,9 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
     segment_order = ['front', 'driver_side', 'rear', 'pass_side', 'interior']
     raw_refs = [IMMACULATE_LOT_URL] + list(vehicle_photos or [])[:2]
     photos = [p for p in (vehicle_photos or []) if p]
-    _zones = _classify_photos(photos)
+    # v4: zones are classified once in the pipeline (before script generation, which
+    # grounds narration in them) and passed through; only classify here if not supplied.
+    _zones = photo_zones if photo_zones is not None else _classify_photos(photos)
     def pick(frac):
         if not photos:
             return None
@@ -978,6 +1012,12 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
             print('[Build] POV final stop: %s' % seg_name)
             seg = _fal_interp_segment(photo_url, None, prompt, seg_text, voice_id, tmpdir, 'leg%d_%s' % (i, seg_name))
         if not seg:
+            if _FAL_LOCK['locked'] and REQUIRE_FAL:
+                raise RuntimeError(
+                    'fal.ai balance exhausted - camera motion impossible, aborting instead of '
+                    'shipping a photo-pan video. Top up at fal.ai/dashboard/billing '
+                    '(or set REQUIRE_FAL=0 to explicitly allow pan-fallback builds). '
+                    'fal said: ' + _FAL_LOCK['detail'])
             print('[Build] leg %s failed, pan fallback' % seg_name)
             audio_local, _a = generate_tts_audio_url(seg_text, voice_id, tmpdir, 'fb_%d_%s' % (i, seg_name))
             if audio_local:
@@ -992,12 +1032,15 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
     if outro_text:
         print('[Build] == OUTRO (on-camera selfie, lot) ==')
         oc = generate_presenter_clip(outro_text, INTRO_LOOK, voice_id, tmpdir, 'outro')
-        # v3: if HeyGen returned a presenter clip with (near-)silent audio, don't ship
-        # a lip-moving mute avatar - fall back to TTS-over-photo.
         if oc:
+            print('[Build] outro presenter raw mean_audio=%s dB' % str(_audio_mean_volume(oc)))
+            # v4: don't trust HeyGen's embedded outro audio at all (v3 shipped a mute
+            # avatar that PASSED the -45 dB check at -32.6 dB mean). The pinned-clone
+            # TTS is lipsynced onto the clip so the voice is guaranteed by construction.
+            oc = _force_voice_on_clip(oc, outro_text, voice_id, tmpdir, 'outro')
             _mv = _audio_mean_volume(oc)
-            if _mv is None or _mv < -45.0:
-                print('[Build] outro presenter clip is silent (mean %.1s dB) - using TTS fallback' % str(_mv))
+            if _mv is None or _mv < -38.0:
+                print('[Build] outro still quiet (mean %s dB) - TTS-over-card fallback' % str(_mv))
                 oc = _tts_fallback_clip(outro_text, voice_id, tmpdir, 'outro') or oc
         if not oc:
             oc = _tts_fallback_clip(outro_text, voice_id, tmpdir, 'outro')

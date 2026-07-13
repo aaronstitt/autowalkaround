@@ -11,6 +11,7 @@ from video_assembler import (
     get_look_id,
     build_walkaround_video,
     compress_video_for_upload,
+    _classify_photos,
 )
 from db import supabase
 
@@ -127,11 +128,18 @@ async def _run_pipeline(job_id, vehicle_url, salesperson_id, dealership_id, page
         except Exception:
             pass
 
+        # v4: classify photos into camera zones FIRST so the script generator can ground
+        # each segment's narration in the photo that leg actually shows (and the builder
+        # reuses the same zones instead of classifying twice).
+        upd('rendering', 'Classifying listing photos...')
+        photo_zones = await loop.run_in_executor(None, lambda: _classify_photos(photos))
+
         upd('rendering', 'Writing segmented walkaround script...')
         script_data = await loop.run_in_executor(None, lambda: generate_walkaround_script(
             vehicle=vehicle,
             salesperson_name=salesperson_name,
-            dealer_name=vehicle.get('dealer_name', 'Immaculate Used Cars')
+            dealer_name=vehicle.get('dealer_name', 'Immaculate Used Cars'),
+            zone_photos=photo_zones
         ))
         full_script = script_data.get('full_script', '')
         segments = script_data.get('segments', {})
@@ -160,7 +168,8 @@ async def _run_pipeline(job_id, vehicle_url, salesperson_id, dealership_id, page
             heygen_result=heygen_result,
             vehicle_photos=photos,
             vehicle_video_url=vehicle_video_url,
-            tmpdir=tmpdir
+            tmpdir=tmpdir,
+            photo_zones=photo_zones
         ))
 
         upd('uploading', 'Uploading video...')
