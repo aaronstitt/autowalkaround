@@ -1,4 +1,4 @@
-import os, requests, time, subprocess, hashlib
+import os, re, requests, time, subprocess, hashlib
 
 HEADERS = {'User-Agent': 'Mozilla/5.0'}
 HEYGEN_BASE = 'https://api.heygen.com'
@@ -492,25 +492,64 @@ def _concat_audio(audio_paths, out, tmpdir):
         return None
 
 def _mux_av(video, audio, out):
+    # v3: apad + -shortest so the muxed clip's audio is EXACTLY as long as its video.
+    # (was -shortest alone, which truncated to the shorter stream and left audio short)
     try:
-        cmd = ['ffmpeg', '-y', '-i', video, '-i', audio, '-map', '0:v', '-map', '1:a',
+        cmd = ['ffmpeg', '-y', '-i', video, '-i', audio,
+               '-filter_complex', '[1:a]apad[a]',
+               '-map', '0:v', '-map', '[a]', '-shortest',
                '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k', '-ar', '44100',
-               '-shortest', '-movflags', '+faststart', out]
+               '-movflags', '+faststart', out]
         r = subprocess.run(cmd, capture_output=True, timeout=300)
         return out if r.returncode == 0 else None
     except Exception as e:
         print('[POV] mux exc: %s' % e)
         return None
 
+def _has_audio_stream(src):
+    try:
+        r = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'a',
+                            '-show_entries', 'stream=codec_type', '-of', 'csv=p=0', src],
+                           capture_output=True, timeout=60)
+        return b'audio' in (r.stdout or b'')
+    except Exception:
+        return False
+
+def _audio_mean_volume(src):
+    """Mean audio level in dB (None if unmeasurable). Used to catch silent presenter clips."""
+    try:
+        r = subprocess.run(['ffmpeg', '-i', src, '-map', '0:a:0', '-af', 'volumedetect',
+                            '-f', 'null', '-'], capture_output=True, timeout=180)
+        m = re.search(rb'mean_volume:\s*(-?[\d\.]+)\s*dB', r.stderr or b'')
+        return float(m.group(1)) if m else None
+    except Exception:
+        return None
+
 def _normalize_clip(src, out):
+    # v3 CRITICAL FIX: every clip leaves here with an audio stream EXACTLY as long as its
+    # video (apad + -shortest; silent track injected if the clip has no audio at all).
+    # The concat demuxer joins audio and video streams independently, so any clip whose
+    # audio ran shorter than its video slid ALL later audio earlier. In v2 every fal leg
+    # carried 1-3s of narration headroom, so by the outro the audio track had run out:
+    # outro played near-silent and narration drifted off its visuals.
     try:
         vf = ('scale=720:1280:force_original_aspect_ratio=decrease,'
               'pad=720:1280:(ow-iw)/2:(oh-ih)/2,fps=25,format=yuv420p,setsar=1')
-        cmd = ['ffmpeg', '-y', '-i', src, '-vf', vf,
-               '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
-               '-af', AUDIO_CLEAN_FILTER,
-               '-c:a', 'aac', '-b:a', '128k', '-ar', '44100',
-               '-movflags', '+faststart', out]
+        if _has_audio_stream(src):
+            cmd = ['ffmpeg', '-y', '-i', src,
+                   '-filter_complex', '[0:v]%s[v];[0:a]%s,apad[a]' % (vf, AUDIO_CLEAN_FILTER),
+                   '-map', '[v]', '-map', '[a]', '-shortest',
+                   '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+                   '-c:a', 'aac', '-b:a', '128k', '-ar', '44100',
+                   '-movflags', '+faststart', out]
+        else:
+            print('[POV] normalize: %s has NO audio stream - injecting silence' % os.path.basename(src))
+            cmd = ['ffmpeg', '-y', '-i', src,
+                   '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
+                   '-vf', vf, '-map', '0:v', '-map', '1:a', '-shortest',
+                   '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+                   '-c:a', 'aac', '-b:a', '128k', '-ar', '44100',
+                   '-movflags', '+faststart', out]
         r = subprocess.run(cmd, capture_output=True, timeout=300)
         return out if r.returncode == 0 else src
     except Exception as e:
@@ -723,8 +762,14 @@ def _segment_with_voice(video_in, audio_local, out, tmpdir, name):
             if _ffrun(['ffmpeg', '-y', '-i', video_in, '-vf', 'tpad=stop_mode=clone:stop_duration=%.2f' % (adur - vdur),
                        '-c:v', 'libx264', '-preset', 'fast', '-crf', '22', ext]):
                 vsrc = ext
-        if not _ffrun(['ffmpeg', '-y', '-i', vsrc, '-i', audio_local, '-map', '0:v', '-map', '1:a',
-                       '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k', '-ar', '44100', '-movflags', '+faststart', out]):
+        # v3: apad narration to the exact video length (-shortest ends at video EOF).
+        # Without this every leg's audio ran 1-3s short of its video and the final concat
+        # slid all downstream audio earlier (root cause of the silent v2 outro).
+        if not _ffrun(['ffmpeg', '-y', '-i', vsrc, '-i', audio_local,
+                       '-filter_complex', '[1:a]apad[a]',
+                       '-map', '0:v', '-map', '[a]', '-shortest',
+                       '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k', '-ar', '44100',
+                       '-movflags', '+faststart', out]):
             return None
         return out
     except Exception as e:
@@ -761,8 +806,9 @@ def _fal_interp_segment(start_photo, end_photo, fal_prompt, narration_text, voic
     if audio_local:
         d = get_audio_duration(audio_local)
         if d and d > 0:
-            # v2: +1s headroom and a 5s floor so the camera move is slower / more human
-            secs = max(5, min(12, int(round(d + 1.0))))
+            # v3: +2s headroom and a 6s floor - more seconds for the same camera path
+            # forces slower motion (v2 still showed whip-pans on the interior legs)
+            secs = max(6, min(12, int(round(d + 2.0))))
     clip = fal_first_last_to_video(s_pub, e_pub, fal_prompt, tmpdir, name, duration=str(secs))
     if not clip:
         return None
@@ -906,7 +952,9 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
     }
     _pace_txt = ('The pace is slow and deliberate like a real person walking while filming: natural handheld '
                  'sway, slight footstep bob, brief pauses, imperfect framing - never gliding, never '
-                 'drone-smooth, never fast. ')
+                 'drone-smooth, never fast. Camera turns are gentle and take several full seconds to '
+                 'complete. Absolutely no whip pans, no fast spins, no sudden rotations, no motion-blur '
+                 'streaks; the image stays sharp and readable at every moment. ')
     _one_vehicle_txt = ('Exactly ONE vehicle exists in the scene: the same %s throughout, colour and details '
                         'unchanged. No people, no hands, no reflection of a person, no second vehicle, no '
                         'duplicate vehicle, no text overlays. Photorealistic, natural light, used-car '
@@ -944,6 +992,13 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
     if outro_text:
         print('[Build] == OUTRO (on-camera selfie, lot) ==')
         oc = generate_presenter_clip(outro_text, INTRO_LOOK, voice_id, tmpdir, 'outro')
+        # v3: if HeyGen returned a presenter clip with (near-)silent audio, don't ship
+        # a lip-moving mute avatar - fall back to TTS-over-photo.
+        if oc:
+            _mv = _audio_mean_volume(oc)
+            if _mv is None or _mv < -45.0:
+                print('[Build] outro presenter clip is silent (mean %.1s dB) - using TTS fallback' % str(_mv))
+                oc = _tts_fallback_clip(outro_text, voice_id, tmpdir, 'outro') or oc
         if not oc:
             oc = _tts_fallback_clip(outro_text, voice_id, tmpdir, 'outro')
         if oc:
@@ -952,7 +1007,10 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
         raise RuntimeError('No clips built')
     norm_clips = []
     for idx, c in enumerate(all_clips):
-        norm_clips.append(_normalize_clip(c, os.path.join(tmpdir, 'norm_%d.mp4' % idx)))
+        nc = _normalize_clip(c, os.path.join(tmpdir, 'norm_%d.mp4' % idx))
+        # v3: audio health log per normalized clip (catches silent/short audio before concat)
+        print('[Build] norm clip %d: %s mean_audio=%s dB' % (idx, os.path.basename(str(c)), _audio_mean_volume(nc)))
+        norm_clips.append(nc)
     if len(norm_clips) == 1:
         final_path = norm_clips[0]
     else:

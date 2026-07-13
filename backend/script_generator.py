@@ -19,13 +19,15 @@ client = openai.OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 SYSTEM_PROMPT = """You are an expert automotive walkaround video scriptwriter.
 You write scripts for a salesperson physically walking a phone camera around a vehicle.
 
-THE VIDEO STRUCTURE - script must match this exactly:
+THE VIDEO STRUCTURE - script must match this exactly (v3: order mirrors the CONTINUOUS
+POV walk the visuals actually take - front, down the driver side, INTO the vehicle,
+back OUT to the rear. There is NO passenger-side stop.):
 - INTRO: Salesperson faces camera, selfie mode, introduces himself and vehicle (15-20 seconds spoken)
-- FRONT: Camera now faces vehicle front - salesperson talks about front-end features
-- DRIVER_SIDE: Walking to driver side - driver-side features
-- REAR: At the rear - rear features including backup camera etc
-- PASS_SIDE: Passenger side - wheels, moldings, exterior
-- INTERIOR: Camera inside vehicle - all interior features
+- FRONT: Camera faces vehicle front - front-end features
+- DRIVER_SIDE: Walking down the driver side - driver-side features, wheels, moldings
+- INTERIOR_FRONT: Through the driver door, at the dashboard - screen, audio, climate, controls
+- INTERIOR_REAR: Turning to the second/third row - rear seats, folding seats, rear A/C, cargo
+- REAR: Stepping back out and around to the rear - backup camera, liftgate, rear features
 - OUTRO: Quick wrap-up, price, call to action
 
 STYLE RULES:
@@ -38,21 +40,21 @@ STYLE RULES:
 7. ONLY use features from the Highlighted Features list - never invent features
 
 CRITICAL LENGTH REQUIREMENT:
-- Each main segment (front, driver_side, rear, pass_side, interior) must be 20-28 words MAX.
+- Each main segment (front, driver_side, interior_front, interior_rear, rear) must be 20-28 words MAX.
 - At normal speaking pace that is 10-13 seconds of audio - this is required for lip sync to work.
 - If you write more than 28 words for any segment, the video will not lip sync correctly.
 - Intro: 25-35 words. Outro: 20-28 words.
 - Count your words carefully before returning the JSON.
 
 WALKAROUND FLOW (most important rule):
-- The middle plays as ONE continuous walk around the vehicle, in this physical order: FRONT, then DRIVER_SIDE, then REAR, then PASS_SIDE, then INTERIOR.
-- Talk about each feature WHERE IT PHYSICALLY IS as you reach it. Exterior features first, interior features last.
-- Use natural walking transitions: "up front here", "coming around the driver side", "let's head around back", "over on the passenger side", "now let's hop inside", "and back here in the rear".
-- INTERIOR segment: cover dashboard and front controls FIRST (screen, audio controls, climate, mirror), THEN rear-cabin and cargo (rear seats, folding seats, rear A/C), as if panning from the dash to the back.
+- The middle plays as ONE continuous walk, in this physical order: FRONT, then DRIVER_SIDE, then INTERIOR_FRONT (stepping in through the driver door), then INTERIOR_REAR, then REAR (stepping back out and walking to the back).
+- Talk about each feature WHERE IT PHYSICALLY IS as you reach it, in that walking order.
+- Use natural walking transitions: "up front here", "coming down the driver side", "now let's hop inside", "back here in the second row", "and let's step out and around back".
+- REAR is the FINAL walking stop: it must read like the end of the walk, right before the outro.
 - Never claim a feature is somewhere it is not. Headlights and grille are up front; backup camera, wiper and liftgate are at the rear; seats, screen, climate and controls are inside.
 
 Return ONLY valid JSON with exactly these keys:
-intro, front, driver_side, rear, pass_side, interior_front, interior_rear, outro, full_script, word_count"""
+intro, front, driver_side, interior_front, interior_rear, rear, outro, full_script, word_count"""
 
 def generate_walkaround_script(vehicle, salesperson_name, dealer_name='Immaculate Used Cars'):
     year = vehicle.get('year', '')
@@ -113,10 +115,15 @@ def generate_walkaround_script(vehicle, salesperson_name, dealer_name='Immaculat
         else:
             unassigned.append(f)
 
+    # v3: no passenger-side stop in the POV walk - wheels/moldings/side features are
+    # covered while walking the driver side instead.
+    driver_features = driver_features + side_features
+    side_features = []
+
     # Distribute unassigned features evenly across segments
-    buckets = [front_features, driver_features, rear_features, side_features]
+    buckets = [front_features, driver_features, rear_features]
     for i, f in enumerate(unassigned):
-        buckets[i % 4].append(f)
+        buckets[i % 3].append(f)
 
     interior_rear_kw = ['rear seat', '3rd row', 'third row', '2nd row', 'second row', 'split fold', 'folding', 'fold', 'stow', 'rear air', 'rear climate', 'rear a/c', 'rear heat', 'dvd', 'entertainment', 'cargo', 'trunk', 'captain', 'bench']
     interior_front_feat = [f for f in interior_feat if not any(k in f.lower() for k in interior_rear_kw)]
@@ -134,16 +141,15 @@ def generate_walkaround_script(vehicle, salesperson_name, dealer_name='Immaculat
         'DEALERSHIP: ' + dealer_name + '\n\n'
         'FEATURES BY CAMERA POSITION:\n\n'
         'FRONT of vehicle:\n' + feat_list(front_features) + '\n\n'
-        'DRIVER SIDE:\n' + feat_list(driver_features) + '\n\n'
-        'REAR of vehicle:\n' + feat_list(rear_features) + '\n\n'
-        'PASSENGER SIDE:\n' + feat_list(side_features) + '\n\n'
+        'DRIVER SIDE (including wheels, tires, moldings):\n' + feat_list(driver_features) + '\n\n'
         'INTERIOR DASHBOARD and FRONT CONTROLS (talk about these while at the dashboard):\n' + feat_list(interior_front_feat) + '\n\n'
         'INTERIOR REAR SEATS and CARGO (talk about these while at the back seats):\n' + feat_list(interior_rear_feat) + '\n\n'
+        'REAR of vehicle (final stop of the walk):\n' + feat_list(rear_features) + '\n\n'
         'INTRO (25-35 words MAX - selfie mode):\n'
         'Aaron faces camera, greets viewer warmly, introduces himself and the vehicle.\n'
         'Must include: his name Aaron, Immaculate Used Cars, year/make/model/trim.\n'
         'End with something like: Let me show you what she has got.\n\n'
-        'EACH MAIN SEGMENT (front, driver_side, rear, pass_side, interior_front, interior_rear):\n'
+        'EACH MAIN SEGMENT (front, driver_side, interior_front, interior_rear, rear):\n'
         'STRICT MAXIMUM: 20-28 words per segment. No more. This is critical for lip sync.\n'
         'Pick 1-2 features max per segment. Be punchy and enthusiastic.\n\n'
         'OUTRO (20-28 words MAX):\n'
@@ -169,14 +175,15 @@ def generate_walkaround_script(vehicle, salesperson_name, dealer_name='Immaculat
     front_s = result.get('front', '')
     driver_s = result.get('driver_side', '')
     rear_s = result.get('rear', '')
-    pass_s = result.get('pass_side', '')
     interior_front_s = result.get('interior_front', '')
     interior_rear_s = result.get('interior_rear', '')
     _price = ('$' + str(price)) if price else 'a great price'
     outro_s = ('Guys that is it for this ' + str(year) + ' ' + str(make) + ' ' + str(model) + _tr + '. It is priced at ' + _price + '. If you are interested give us a call or come on in and we will get you taken care of. I am ' + salesperson_name + ' with ' + dealer_name + ' - come see us!')
     full = result.get('full_script', '')
     if not full:
-        full = ' '.join(filter(None, [intro_s, front_s, driver_s, rear_s, pass_s, interior_front_s, interior_rear_s, outro_s]))
+        # v3: full script joins in WALK order (matches the visuals): front -> driver side
+        # -> inside (dash, then rear seats) -> back out to the rear -> outro.
+        full = ' '.join(filter(None, [intro_s, front_s, driver_s, interior_front_s, interior_rear_s, rear_s, outro_s]))
 
     # Hard truncation safety net: if any segment exceeds ~130 words/min * 13s = ~28 words, trim it
     def _trim_to_words(text, max_words=28):
@@ -190,7 +197,6 @@ def generate_walkaround_script(vehicle, salesperson_name, dealer_name='Immaculat
     front_s = _trim_to_words(front_s)
     driver_s = _trim_to_words(driver_s)
     rear_s = _trim_to_words(rear_s)
-    pass_s = _trim_to_words(pass_s)
     interior_front_s = _trim_to_words(interior_front_s)
     interior_rear_s = _trim_to_words(interior_rear_s)
     outro_s = _trim_to_words(outro_s)
@@ -200,26 +206,26 @@ def generate_walkaround_script(vehicle, salesperson_name, dealer_name='Immaculat
     return {
         'full_script': full,
         'intro_script': intro_s,
-        'exterior_script': ' '.join(filter(None, [front_s, driver_s, rear_s, pass_s])),
+        'exterior_script': ' '.join(filter(None, [front_s, driver_s, rear_s])),
         'interior_script': (interior_front_s + ' ' + interior_rear_s).strip(),
         'outro_script': outro_s,
+        # v3: segment keys/order mirror the visual walk exactly; pass_side removed
+        # (v2 generated a pass_side narration no leg ever played).
         'segments': {
             'intro': intro_s,
             'front': front_s,
             'driver_side': driver_s,
-            'rear': rear_s,
-            'pass_side': pass_s,
             'interior_front': interior_front_s,
             'interior_rear': interior_rear_s,
+            'rear': rear_s,
             'outro': outro_s,
         },
         'feature_map': {
             'front': front_features,
             'driver_side': driver_features,
-            'rear': rear_features,
-            'pass_side': side_features,
             'interior_front': interior_front_feat,
             'interior_rear': interior_rear_feat,
+            'rear': rear_features,
         },
         'word_count': len(full.split()),
     }

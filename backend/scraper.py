@@ -101,42 +101,83 @@ def _fetch_with_retry(url: str, max_retries: int = 4, timeout: int = 20) -> requ
 
     raise requests.exceptions.RetryError(f"Failed to fetch {url} after {max_retries} attempts")
 
+PRICE_LO, PRICE_HI = 2500, 250000
+
+def _price_num(v):
+    try:
+        return int(float(str(v).replace(',', '').replace('$', '').strip()))
+    except Exception:
+        return 0
+
+def _advertised_price(html: str) -> str:
+    """v3: the dealer.com price stack renders label/value pairs, e.g.
+        Price       $12,829   <- the ADVERTISED price we must quote
+        Doc Fee     $599
+        Final Price $13,428   <- advertised + doc fee; v2 wrongly quoted this
+    Take the amount whose label text node is exactly an advertised-price label.
+    'Final Price' / 'Doc Fee' are different text nodes, so '>\\s*Price\\s*<' cannot
+    match them."""
+    labels = r'(?:Price|Sale\s+Price|Internet\s+Price|Asking\s+Price|Our\s+Price)'
+    pat = r'>\s*' + labels + r'\s*<[^$]{0,400}?\$\s?(\d{1,3}(?:,\d{3})+)'
+    for m in re.finditer(pat, html, re.I):
+        v = _price_num(m.group(1))
+        if PRICE_LO <= v <= PRICE_HI:
+            print(f'[Scraper] advertised (labeled) price: {v}')
+            return str(v)
+    return ''
+
+def _excluded_price_values(html: str) -> set:
+    """Amounts that must never be quoted as the sale price: final price (with fees),
+    doc fee, totals."""
+    bad = set()
+    for pat in (r'"finalPrice"\s*:\s*"?([\d,\.]+)',
+                r'"totalPrice"\s*:\s*"?([\d,\.]+)',
+                r'"docFee"\s*:\s*"?([\d,\.]+)',
+                r'>\s*Final\s+Price\s*<[^$]{0,400}?\$\s?(\d{1,3}(?:,\d{3})+)',
+                r'>\s*Doc\s+Fee\s*<[^$]{0,400}?\$\s?(\d{1,3}(?:,\d{3})+)'):
+        for m in re.findall(pat, html, re.I):
+            bad.add(_price_num(m))
+    return bad
+
 def _plausible_price(jsonld_price: str, html: str) -> str:
-    """Return a believable vehicle sale price. Doc fees / add-ons (< $2,500) are rejected.
-    Fallback: scan the page for dealer.com price fields, then visible $X,XXX amounts."""
-    def _num(v):
-        try:
-            return int(float(str(v).replace(',', '').replace('$', '').strip()))
-        except Exception:
-            return 0
-    LO, HI = 2500, 250000
+    """Return a believable vehicle sale price. Doc fees / add-ons (< $2,500) are rejected,
+    and amounts identified as Final Price / Doc Fee are never used (v3).
+    Order: labeled advertised price > plausible JSON-LD > structured fields > visible $ amounts."""
+    _num = _price_num
+    LO, HI = PRICE_LO, PRICE_HI
+    bad = _excluded_price_values(html)
+    # v3: the labeled advertised price is the ground truth when present - even a
+    # plausible JSON-LD/structured price can be the Final Price (fees baked in).
+    adv = _advertised_price(html)
+    if adv and _num(adv) not in bad:
+        return adv
     n = _num(jsonld_price)
-    if LO <= n <= HI:
+    if LO <= n <= HI and n not in bad:
         return str(n)
     candidates = []
     # dealer.com structured fields, most authoritative first
-    for pat in (r'"internetPrice"\s*:\s*"?([\d,\.]+)',
+    for pat in (r'"askingPrice"\s*:\s*"?([\d,\.]+)',
+                r'"internetPrice"\s*:\s*"?([\d,\.]+)',
                 r'"salePrice"\s*:\s*"?([\d,\.]+)',
-                r'"askingPrice"\s*:\s*"?([\d,\.]+)',
                 r'itemprop="price"[^>]*content="([\d,\.]+)"',
                 r'"price"\s*:\s*"?([\d,\.]+)'):
         for m in re.findall(pat, html):
             v = _num(m)
-            if LO <= v <= HI:
+            if LO <= v <= HI and v not in bad:
                 candidates.append(v)
         if candidates:
             break
     if not candidates:
         for m in re.findall(r'\$\s?(\d{1,3}(?:,\d{3})+)', html):
             v = _num(m)
-            if LO <= v <= HI:
+            if LO <= v <= HI and v not in bad:
                 candidates.append(v)
     if candidates:
         # most repeated on-page amount is almost always the advertised price
         best = max(set(candidates), key=candidates.count)
-        print(f'[Scraper] JSON-LD price {jsonld_price!r} implausible; using on-page price {best}')
+        print(f'[Scraper] JSON-LD price {jsonld_price!r} unusable; using on-page price {best}')
         return str(best)
-    print(f'[Scraper] JSON-LD price {jsonld_price!r} implausible and no fallback found; leaving empty')
+    print(f'[Scraper] JSON-LD price {jsonld_price!r} unusable and no fallback found; leaving empty')
     return ''
 
 def parse_vehicle_html(html: str, url: str) -> dict:
