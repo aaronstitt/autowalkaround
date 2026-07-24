@@ -999,18 +999,19 @@ def build_walkaround_video(vehicle, script_segments, heygen_audio_path,
         if not ic:
             ic = _tts_fallback_clip(intro_text, voice_id, tmpdir, 'intro')
         if ic:
-            # v4.1: the v3 outro failure (HeyGen returns a lip-moving clip whose audio is
-            # unvoiced mouth-pops, loud enough to pass any volume check) can hit the intro
-            # too. Detect by VOICING, and only pay for the lipsync repair when needed.
+            # v4.2: HeyGen's embedded intro audio ships with baked-in background noise
+            # under the speech (measured on the Caravan renders: stationary intro floor
+            # -34 dB in v2/v3 vs -39 dB in v1; noise fragments at 100-300 Hz ride UNDER
+            # the voice, where AUDIO_CLEAN_FILTER's afftdn cannot reach without gutting
+            # the speech). Same structural fix as the v4 outro: never use HeyGen's
+            # embedded audio at all - the pinned-clone TTS (clean by construction, no
+            # room tone) is lipsynced onto the clip. Voiced check stays as a backstop.
+            ic = _force_voice_on_clip(ic, intro_text, voice_id, tmpdir, 'intro')
             _ivf = _voiced_fraction(ic, tmpdir)
             print('[Build] intro voiced_fraction=%s' % str(_ivf))
             if _ivf is not None and _ivf < VOICED_MIN:
-                print('[Build] intro audio is pops/mute, not speech - forcing pinned voice')
-                ic = _force_voice_on_clip(ic, intro_text, voice_id, tmpdir, 'intro')
-                _ivf = _voiced_fraction(ic, tmpdir)
-                if _ivf is not None and _ivf < VOICED_MIN:
-                    print('[Build] intro STILL unvoiced (%s) - TTS-over-card fallback' % str(_ivf))
-                    ic = _tts_fallback_clip(intro_text, voice_id, tmpdir, 'intro') or ic
+                print('[Build] intro STILL unvoiced (%s) - TTS-over-card fallback' % str(_ivf))
+                ic = _tts_fallback_clip(intro_text, voice_id, tmpdir, 'intro') or ic
             all_clips.append(_pace_clip(ic, tmpdir, 'intro'))
 
     print('[Build] == FAL VEHICLE SHOWCASE (photoreal image-to-video) ==')
